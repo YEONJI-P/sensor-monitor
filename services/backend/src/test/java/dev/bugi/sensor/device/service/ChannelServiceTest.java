@@ -1,5 +1,9 @@
 package dev.bugi.sensor.device.service;
 
+import dev.bugi.sensor.alert.entity.AlarmEpisode;
+import dev.bugi.sensor.alert.entity.AlarmResolutionReason;
+import dev.bugi.sensor.alert.entity.AlertSeverity;
+import dev.bugi.sensor.alert.repository.AlarmEpisodeRepository;
 import dev.bugi.sensor.device.dto.ChannelCreateRequest;
 import dev.bugi.sensor.device.dto.ChannelResponse;
 import dev.bugi.sensor.device.dto.ChannelUpdateRequest;
@@ -7,6 +11,7 @@ import dev.bugi.sensor.device.entity.Device;
 import dev.bugi.sensor.device.entity.SensorChannel;
 import dev.bugi.sensor.device.entity.SensorChannel.ThresholdDirection;
 import dev.bugi.sensor.device.repository.DeviceRepository;
+import dev.bugi.sensor.device.repository.ChannelStatusRepository;
 import dev.bugi.sensor.device.repository.SensorChannelRepository;
 import dev.bugi.sensor.factory.entity.Factory;
 import dev.bugi.sensor.factory.entity.Zone;
@@ -14,13 +19,17 @@ import dev.bugi.sensor.global.service.AccessControlService;
 import dev.bugi.sensor.user.entity.Role;
 import dev.bugi.sensor.user.entity.User;
 import dev.bugi.sensor.user.entity.UserStatus;
+import jakarta.persistence.EntityManager;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.InjectMocks;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
+import org.springframework.context.ApplicationEventPublisher;
 import org.springframework.security.access.AccessDeniedException;
 
+import java.time.Clock;
+import java.time.Instant;
 import java.util.List;
 import java.util.Optional;
 
@@ -28,13 +37,19 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.*;
+import org.springframework.test.util.ReflectionTestUtils;
 
 @ExtendWith(MockitoExtension.class)
 class ChannelServiceTest {
 
     @Mock DeviceRepository deviceRepository;
     @Mock SensorChannelRepository sensorChannelRepository;
+    @Mock ChannelStatusRepository channelStatusRepository;
+    @Mock AlarmEpisodeRepository alarmEpisodeRepository;
     @Mock AccessControlService accessControlService;
+    @Mock EntityManager entityManager;
+    @Mock ApplicationEventPublisher eventPublisher;
+    @Mock Clock clock;
 
     @InjectMocks
     ChannelService channelService;
@@ -173,12 +188,49 @@ class ChannelServiceTest {
 
         when(accessControlService.getUser("EMP001")).thenReturn(user);
         when(accessControlService.getChannel(5L)).thenReturn(channel);
+        when(channelStatusRepository.findByIdForUpdate(5L))
+                .thenReturn(Optional.of(new dev.bugi.sensor.device.entity.ChannelStatus(channel)));
+        when(alarmEpisodeRepository.findOpenThresholdForUpdate(5L)).thenReturn(Optional.empty());
 
         channelService.updateChannel(5L, request, "EMP001");
 
         verify(accessControlService).assertCanAccessChannel(user, channel);
         verify(sensorChannelRepository).save(channel);
         assertThat(channel.getThresholdValue()).isEqualTo(1500.0);
+    }
+
+    @Test
+    void threshold_config_변경은_활성_episode를_CONFIG_CHANGED로_즉시_종료한다() {
+        User user = mockUser();
+        Device device = device();
+        ReflectionTestUtils.setField(device, "id", 1L);
+        SensorChannel channel = channel(device);
+        ReflectionTestUtils.setField(channel, "id", 5L);
+        dev.bugi.sensor.device.entity.ChannelStatus status =
+                new dev.bugi.sensor.device.entity.ChannelStatus(channel);
+        ReflectionTestUtils.setField(status, "channelId", 5L);
+        Instant now = Instant.parse("2026-07-23T01:00:00Z");
+        AlarmEpisode episode = AlarmEpisode.openThreshold(
+                device, channel, AlertSeverity.WARNING, now.minusSeconds(60),
+                java.util.Map.of("channelCode", "s4"));
+        status.enterAlarm(episode, now.minusSeconds(60));
+
+        when(accessControlService.getUser("EMP001")).thenReturn(user);
+        when(accessControlService.getChannel(5L)).thenReturn(channel);
+        when(channelStatusRepository.findByIdForUpdate(5L)).thenReturn(Optional.of(status));
+        when(alarmEpisodeRepository.findOpenThresholdForUpdate(5L))
+                .thenReturn(Optional.of(episode));
+        when(clock.instant()).thenReturn(now);
+
+        channelService.updateChannel(5L, new ChannelUpdateRequest(
+                "°R", "temperature", 1500.0, ThresholdDirection.ABOVE), "EMP001");
+
+        assertThat(episode.isOpen()).isFalse();
+        assertThat(episode.getResolutionReason()).isEqualTo(AlarmResolutionReason.CONFIG_CHANGED);
+        assertThat(status.isInAlarm()).isFalse();
+        assertThat(status.getActiveEpisode()).isNull();
+        verify(eventPublisher).publishEvent(
+                any(dev.bugi.sensor.sse.SseBroadcastEvent.class));
     }
 
     @Test

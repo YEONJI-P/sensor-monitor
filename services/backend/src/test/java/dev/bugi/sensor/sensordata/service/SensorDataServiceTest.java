@@ -1,11 +1,18 @@
 package dev.bugi.sensor.sensordata.service;
 
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.datatype.jsr310.JavaTimeModule;
 import dev.bugi.sensor.alert.entity.Alert;
+import dev.bugi.sensor.alert.entity.AlarmAcknowledgement;
+import dev.bugi.sensor.alert.entity.AlarmEpisode;
+import dev.bugi.sensor.alert.entity.AlertNotificationReason;
 import dev.bugi.sensor.alert.entity.AlertSeverity;
+import dev.bugi.sensor.alert.repository.AlarmEpisodeRepository;
+import dev.bugi.sensor.alert.repository.AlarmAcknowledgementRepository;
 import dev.bugi.sensor.alert.repository.AlertRepository;
+import dev.bugi.sensor.alert.service.AlarmNotificationFactory;
 import dev.bugi.sensor.device.entity.ChannelStatus;
 import dev.bugi.sensor.device.entity.Device;
-import dev.bugi.sensor.device.entity.DeviceStatus;
 import dev.bugi.sensor.device.entity.SensorChannel;
 import dev.bugi.sensor.device.entity.SensorChannel.ThresholdDirection;
 import dev.bugi.sensor.device.repository.ChannelStatusRepository;
@@ -17,6 +24,9 @@ import dev.bugi.sensor.sensordata.anomaly.AnomalyDetector;
 import dev.bugi.sensor.sensordata.anomaly.ThresholdDetector;
 import dev.bugi.sensor.sensordata.dto.BatchIngestRequest;
 import dev.bugi.sensor.sensordata.dto.BatchIngestResult;
+import dev.bugi.sensor.sensordata.dto.BatchSsePayload;
+import dev.bugi.sensor.sensordata.entity.IngestOutcome;
+import dev.bugi.sensor.sensordata.entity.IngestReceipt;
 import dev.bugi.sensor.sensordata.entity.MeasurementBatch;
 import dev.bugi.sensor.sensordata.entity.SensorReading;
 import dev.bugi.sensor.sensordata.failure.FailedReading;
@@ -27,6 +37,7 @@ import dev.bugi.sensor.sse.SseBroadcastEvent;
 import dev.bugi.sensor.user.entity.Role;
 import dev.bugi.sensor.user.entity.User;
 import dev.bugi.sensor.user.entity.UserStatus;
+import jakarta.persistence.EntityManager;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
@@ -37,6 +48,7 @@ import org.mockito.Mock;
 import org.mockito.Spy;
 import org.mockito.junit.jupiter.MockitoExtension;
 import org.springframework.security.access.AccessDeniedException;
+import org.springframework.test.util.ReflectionTestUtils;
 
 import java.time.Clock;
 import java.time.Duration;
@@ -62,10 +74,16 @@ class SensorDataServiceTest {
     @Mock MeasurementBatchRepository measurementBatchRepository;
     @Mock SensorReadingRepository sensorReadingRepository;
     @Mock AlertRepository alertRepository;
+    @Mock AlarmEpisodeRepository alarmEpisodeRepository;
+    @Mock AlarmAcknowledgementRepository alarmAcknowledgementRepository;
+    @Spy AlarmNotificationFactory alarmNotificationFactory = new AlarmNotificationFactory();
     @Mock FailedReadingRepository failedReadingRepository;
+    @Mock IngestReceiptService ingestReceiptService;
     @Spy AnomalyDetector anomalyDetector = new ThresholdDetector();
     @Mock org.springframework.context.ApplicationEventPublisher eventPublisher;
     @Mock AccessControlService accessControlService;
+    @Spy ObjectMapper objectMapper = new ObjectMapper().registerModule(new JavaTimeModule());
+    @Mock EntityManager entityManager;
     @Mock Clock clock;
 
     @Captor ArgumentCaptor<Alert> alertCaptor;
@@ -81,6 +99,7 @@ class SensorDataServiceTest {
     private Device device;
     private SensorChannel channel;
     private ChannelStatus channelStatus; // receive 호출 간 알람 상태를 이어가려고 같은 인스턴스를 돌려준다.
+    private long nextBatchId;
 
     @BeforeEach
     void stubClock() {
@@ -95,18 +114,31 @@ class SensorDataServiceTest {
     private void arrange(Double threshold, ThresholdDirection direction) {
         device = Device.builder().zone(null).code("CMAPSS-U1").name("엔진 유닛1")
                 .location("C-MAPSS unit1").expectedIntervalSeconds(10).build();
+        ReflectionTestUtils.setField(device, "id", 1L);
         channel = SensorChannel.builder().device(device).code("s4").unit("°R")
                 .quantityKind("temperature").thresholdValue(threshold)
                 .thresholdDirection(direction).build();
+        ReflectionTestUtils.setField(channel, "id", 10L);
         channelStatus = new ChannelStatus(channel);
+        ReflectionTestUtils.setField(channelStatus, "channelId", 10L);
+        nextBatchId = 1L;
 
         lenient().when(deviceRepository.findByCode("CMAPSS-U1")).thenReturn(Optional.of(device));
         lenient().when(sensorChannelRepository.findByDeviceId(any())).thenReturn(List.of(channel));
         // 상태 일괄 로드: 같은 인스턴스를 돌려줘 receive 호출 간 알람 상태가 이어진다.
-        lenient().when(channelStatusRepository.findAllById(any())).thenReturn(List.of(channelStatus));
-        lenient().when(deviceStatusRepository.findById(any()))
-                .thenReturn(Optional.of(new DeviceStatus(device, FIXED)));
-        lenient().when(measurementBatchRepository.save(any())).thenAnswer(inv -> inv.getArgument(0));
+        lenient().when(channelStatusRepository.findAllByIdInForUpdateOrderByChannelId(any()))
+                .thenReturn(List.of(channelStatus));
+        lenient().when(alarmEpisodeRepository.findOpenThresholdForUpdate(any()))
+                .thenAnswer(inv -> Optional.ofNullable(channelStatus.getActiveEpisode())
+                        .filter(AlarmEpisode::isOpen));
+        lenient().when(alarmEpisodeRepository.save(any())).thenAnswer(inv -> inv.getArgument(0));
+        lenient().when(alertRepository.save(any())).thenAnswer(inv -> inv.getArgument(0));
+        lenient().when(deviceStatusRepository.advanceLastSeenAt(any(), any())).thenReturn(1);
+        lenient().when(measurementBatchRepository.save(any())).thenAnswer(inv -> {
+            MeasurementBatch batch = inv.getArgument(0);
+            ReflectionTestUtils.setField(batch, "id", nextBatchId++);
+            return batch;
+        });
         lenient().when(sensorReadingRepository.save(any())).thenAnswer(inv -> inv.getArgument(0));
         lenient().when(channelStatusRepository.save(any())).thenAnswer(inv -> inv.getArgument(0));
         lenient().when(deviceStatusRepository.save(any())).thenAnswer(inv -> inv.getArgument(0));
@@ -199,12 +231,20 @@ class SensorDataServiceTest {
         SensorChannel ch = SensorChannel.builder().device(dev).code("s4").unit("°R")
                 .quantityKind("temperature").thresholdValue(1416.0)
                 .thresholdDirection(ThresholdDirection.ABOVE).build();
+        ReflectionTestUtils.setField(ch, "id", 10L);
         when(deviceRepository.findByCode("CMAPSS-U1")).thenReturn(Optional.of(dev));
         when(sensorChannelRepository.findByDeviceId(42L)).thenReturn(List.of(ch));
-        when(measurementBatchRepository.save(any())).thenAnswer(inv -> inv.getArgument(0));
-        when(deviceStatusRepository.findById(any())).thenReturn(Optional.of(new DeviceStatus(dev, FIXED)));
-        when(channelStatusRepository.findAllById(any())).thenReturn(List.of());
-        when(channelStatusRepository.save(any())).thenAnswer(inv -> inv.getArgument(0));
+        when(measurementBatchRepository.save(any())).thenAnswer(inv -> {
+            MeasurementBatch batch = inv.getArgument(0);
+            ReflectionTestUtils.setField(batch, "id", 1L);
+            return batch;
+        });
+        when(deviceStatusRepository.advanceLastSeenAt(42L, FIXED)).thenReturn(1);
+        ChannelStatus status = new ChannelStatus(ch);
+        ReflectionTestUtils.setField(status, "channelId", 10L);
+        when(channelStatusRepository.findAllByIdInForUpdateOrderByChannelId(any()))
+                .thenReturn(List.of(status));
+        when(alarmEpisodeRepository.findOpenThresholdForUpdate(any())).thenReturn(Optional.empty());
 
         Map<String, Double> m = new LinkedHashMap<>();
         m.put("s4", 100.0);     // known
@@ -232,7 +272,7 @@ class SensorDataServiceTest {
         assertThat(result.outcome()).isEqualTo(BatchIngestResult.Outcome.NO_KNOWN_CHANNELS);
         assertThat(result.response().batchId()).isNull();
         verify(measurementBatchRepository, never()).save(any());
-        verify(deviceStatusRepository, never()).findById(any()); // markSeen 안 함
+        verify(deviceStatusRepository, never()).advanceLastSeenAt(any(), any()); // markSeen 안 함
         verify(failedReadingRepository, times(1)).saveAll(any());
     }
 
@@ -252,27 +292,21 @@ class SensorDataServiceTest {
     // ── 하트비트 ────────────────────────────────────────────────────────
 
     @Test
-    void 최초_수신이면_DeviceStatus를_생성해_저장한다() {
+    void 정상_수신이면_DeviceStatus의_lastSeenAt을_원자적으로_전진시킨다() {
         arrange(1416.0);
-        when(deviceStatusRepository.findById(any())).thenReturn(Optional.empty());
 
         sensorDataService.receive(req(1000.0));
 
-        ArgumentCaptor<DeviceStatus> captor = ArgumentCaptor.forClass(DeviceStatus.class);
-        verify(deviceStatusRepository).save(captor.capture());
-        assertThat(captor.getValue().getDevice()).isSameAs(device);
-        assertThat(captor.getValue().getLastSeenAt()).isEqualTo(FIXED);
+        verify(deviceStatusRepository).advanceLastSeenAt(device.getId(), FIXED);
     }
 
     @Test
-    void 기존_DeviceStatus가_있으면_lastSeenAt이_현재시각으로_갱신된다() {
+    void DeviceStatus가_없으면_invariant_오류로_전체_수신을_실패시킨다() {
         arrange(1416.0);
-        DeviceStatus existing = new DeviceStatus(device, FIXED.minus(Duration.ofHours(1)));
-        when(deviceStatusRepository.findById(any())).thenReturn(Optional.of(existing));
+        when(deviceStatusRepository.advanceLastSeenAt(any(), any())).thenReturn(0);
 
-        sensorDataService.receive(req(1000.0));
-
-        assertThat(existing.getLastSeenAt()).isEqualTo(FIXED);
+        assertThrows(IllegalStateException.class,
+                () -> sensorDataService.receive(req(1000.0)));
     }
 
     // ── SSE 브로드캐스트 ────────────────────────────────────────────────
@@ -295,9 +329,9 @@ class SensorDataServiceTest {
         sensorDataService.receive(req(200.0));
 
         ArgumentCaptor<SseBroadcastEvent> captor = ArgumentCaptor.forClass(SseBroadcastEvent.class);
-        verify(eventPublisher, times(2)).publishEvent(captor.capture());
+        verify(eventPublisher, times(3)).publishEvent(captor.capture());
         assertThat(captor.getAllValues()).extracting(SseBroadcastEvent::event)
-                .containsExactly("sensor-data", "alert");
+                .containsExactly("alarm-episode", "sensor-data", "alert");
     }
 
     // ── 엣지 트리거 쿨다운 ──────────────────────────────────────────────
@@ -392,6 +426,133 @@ class SensorDataServiceTest {
         sensorDataService.receive(req(200.0));       // 억제(산발 스파이크 취급)
 
         verify(alertRepository, times(1)).save(any(Alert.class));
+        assertThat(channelStatus.isInAlarm()).isTrue();
+        assertThat(channelStatus.getActiveEpisode()).isNotNull();
+    }
+
+    @Test
+    void 지속_breach는_쿨다운_경과_후_다음_reading에서_REMINDER를_만든다() {
+        arrange(100.0);
+
+        sensorDataService.receive(req(105.0));
+        now[0] = FIXED.plus(Duration.ofMinutes(5));
+        sensorDataService.receive(req(106.0));
+
+        verify(alertRepository, times(2)).save(alertCaptor.capture());
+        assertThat(alertCaptor.getAllValues().get(1).getNotificationReason())
+                .isEqualTo(AlertNotificationReason.REMINDER);
+    }
+
+    @Test
+    void 현재_severity를_ACK하면_지속_breach_REMINDER를_억제한다() {
+        arrange(100.0);
+
+        sensorDataService.receive(req(105.0));
+        AlarmAcknowledgement acknowledgement = mock(AlarmAcknowledgement.class);
+        when(acknowledgement.getCreatedAt()).thenReturn(FIXED.plusSeconds(1));
+        when(acknowledgement.getAckSeverity()).thenReturn(AlertSeverity.WARNING);
+        when(alarmAcknowledgementRepository.findFirstByEpisodeIdOrderByCreatedAtDesc(any()))
+                .thenReturn(Optional.of(acknowledgement));
+
+        now[0] = FIXED.plus(Duration.ofMinutes(5));
+        sensorDataService.receive(req(106.0));
+
+        verify(alertRepository, times(1)).save(any(Alert.class));
+    }
+
+    @Test
+    void 같은_observedAt_cursor는_더_큰_batchId만_허용한다() {
+        arrange(100.0);
+        channelStatus.markEvaluated(FIXED, 20L);
+
+        assertThat(channelStatus.shouldEvaluate(FIXED, 19L)).isFalse();
+        assertThat(channelStatus.shouldEvaluate(FIXED, 20L)).isFalse();
+        assertThat(channelStatus.shouldEvaluate(FIXED, 21L)).isTrue();
+    }
+
+    @Test
+    void WARNING에서_CRITICAL로_상승하면_쿨다운_중에도_즉시_escalation한다() {
+        arrange(100.0);
+
+        sensorDataService.receive(req(105.0));
+        now[0] = FIXED.plus(Duration.ofMinutes(1));
+        sensorDataService.receive(req(200.0));
+
+        verify(alertRepository, times(2)).save(alertCaptor.capture());
+        Alert escalated = alertCaptor.getAllValues().get(1);
+        assertThat(escalated.getSeverity()).isEqualTo(AlertSeverity.CRITICAL);
+        assertThat(escalated.getNotificationReason())
+                .isEqualTo(AlertNotificationReason.SEVERITY_ESCALATION);
+    }
+
+    @Test
+    void 역행_reading은_저장과_SSE에는_남지만_state와_episode에는_적용하지_않는다() {
+        arrange(100.0);
+        sensorDataService.receive(new BatchIngestRequest(
+                "CMAPSS-U1", FIXED, null, Map.of("s4", 105.0)));
+
+        BatchIngestResult late = sensorDataService.receive(new BatchIngestRequest(
+                "CMAPSS-U1", FIXED.minusSeconds(1), null, Map.of("s4", 50.0)));
+
+        assertThat(late.response().savedCount()).isOne();
+        assertThat(late.response().stateAppliedCount()).isZero();
+        assertThat(channelStatus.isInAlarm()).isTrue();
+        assertThat(channelStatus.getLastEvaluatedObservedAt()).isEqualTo(FIXED);
+        verify(sensorReadingRepository, times(2)).save(any());
+
+        ArgumentCaptor<SseBroadcastEvent> eventCaptor =
+                ArgumentCaptor.forClass(SseBroadcastEvent.class);
+        verify(eventPublisher, times(4)).publishEvent(eventCaptor.capture());
+        SseBroadcastEvent lateSensorEvent = eventCaptor.getAllValues().get(3);
+        BatchSsePayload payload = (BatchSsePayload) lateSensorEvent.payload();
+        assertThat(payload.readings()).singleElement()
+                .extracting(BatchSsePayload.Reading::stateApplied).isEqualTo(false);
+    }
+
+    @Test
+    void 미래_관측시각은_failed_reading만_남기고_batch와_heartbeat를_만들지_않는다() {
+        arrange(100.0);
+        BatchIngestRequest request = new BatchIngestRequest(
+                "CMAPSS-U1", FIXED.plus(Duration.ofMinutes(5)).plusMillis(1),
+                7L, Map.of("s4", 105.0));
+
+        BatchIngestResult result = sensorDataService.receive(request);
+
+        assertThat(result.outcome()).isEqualTo(BatchIngestResult.Outcome.FUTURE_OBSERVED_AT);
+        assertThat(result.response().stateAppliedCount()).isZero();
+        verify(failedReadingRepository).save(argThat(
+                failed -> failed.getReason().equals("FUTURE_OBSERVED_AT")));
+        verify(measurementBatchRepository, never()).save(any());
+        verify(deviceStatusRepository, never()).findById(any());
+        verify(eventPublisher, never()).publishEvent(any());
+    }
+
+    @Test
+    void 동일_eventId_replay는_저장과_SSE없이_최초_응답을_그대로_반환한다() {
+        arrange(100.0);
+        IngestReceipt receipt = new IngestReceipt(
+                "CMAPSS-U1", "evt-1", "hash", FIXED.minusSeconds(1));
+        receipt.complete(IngestOutcome.SAVED, 200, Map.of(
+                "batchId", 77,
+                "deviceId", 1,
+                "deviceCode", "CMAPSS-U1",
+                "observedAt", "2026-07-16T00:00:00Z",
+                "receivedAt", "2026-07-16T00:00:00Z",
+                "savedCount", 1,
+                "rejected", List.of(),
+                "eventId", "evt-1",
+                "stateAppliedCount", 1));
+        when(ingestReceiptService.claim(eq("CMAPSS-U1"), eq("evt-1"), any()))
+                .thenReturn(new IngestReceiptService.Claim(receipt, false));
+
+        BatchIngestResult replayed = sensorDataService.receive(new BatchIngestRequest(
+                "CMAPSS-U1", FIXED, 1L, Map.of("s4", 105.0), "evt-1"));
+
+        assertThat(replayed.response().batchId()).isEqualTo(77L);
+        assertThat(replayed.response().eventId()).isEqualTo("evt-1");
+        assertThat(replayed.response().stateAppliedCount()).isOne();
+        verify(measurementBatchRepository, never()).save(any());
+        verify(eventPublisher, never()).publishEvent(any());
     }
 
     // ── severity ────────────────────────────────────────────────────────

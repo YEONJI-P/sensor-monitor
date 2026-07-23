@@ -4,7 +4,9 @@ import dev.bugi.sensor.device.dto.DeviceRegisterRequest;
 import dev.bugi.sensor.device.dto.DeviceResponse;
 import dev.bugi.sensor.device.dto.DeviceUpdateRequest;
 import dev.bugi.sensor.device.entity.Device;
+import dev.bugi.sensor.device.entity.DeviceStatus;
 import dev.bugi.sensor.device.repository.DeviceRepository;
+import dev.bugi.sensor.device.repository.DeviceStatusRepository;
 import dev.bugi.sensor.global.service.AccessControlService;
 import dev.bugi.sensor.factory.entity.Zone;
 import dev.bugi.sensor.factory.repository.ZoneRepository;
@@ -20,6 +22,7 @@ import java.util.List;
 public class DeviceService {
 
     private final DeviceRepository deviceRepository;
+    private final DeviceStatusRepository deviceStatusRepository;
     private final ZoneRepository zoneRepository;
     private final AccessControlService accessControlService;
 
@@ -39,6 +42,7 @@ public class DeviceService {
                 .expectedIntervalSeconds(request.getExpectedIntervalSeconds())
                 .build();
         deviceRepository.save(device);
+        deviceStatusRepository.save(new DeviceStatus(device));
         return DeviceResponse.from(device);
     }
 

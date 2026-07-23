@@ -89,6 +89,12 @@ public class SecurityConfig {
                         .requestMatchers(HttpMethod.GET, "/alerts", "/alerts/**")
                         .hasAnyRole("SYSTEM_ADMIN", "FACTORY_ADMIN", "MEMBER", "VIEWER")
 
+                        // alarm episode 조회는 운영 조회 역할 전체, ack는 VIEWER를 제외한다.
+                        .requestMatchers(HttpMethod.POST, "/alarm-episodes/*/ack")
+                        .hasAnyRole("SYSTEM_ADMIN", "FACTORY_ADMIN", "MEMBER")
+                        .requestMatchers(HttpMethod.GET, "/alarm-episodes", "/alarm-episodes/**")
+                        .hasAnyRole("SYSTEM_ADMIN", "FACTORY_ADMIN", "MEMBER", "VIEWER")
+
                         // 채널 조회 — 센서 데이터 조회와 같은 계열(VIEWER 읽기 가능)
                         .requestMatchers(HttpMethod.GET, "/channels", "/channels/**")
                         .hasAnyRole("SYSTEM_ADMIN", "FACTORY_ADMIN", "MEMBER", "VIEWER")

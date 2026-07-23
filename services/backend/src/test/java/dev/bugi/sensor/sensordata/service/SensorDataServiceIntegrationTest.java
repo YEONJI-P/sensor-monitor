@@ -1,7 +1,11 @@
 package dev.bugi.sensor.sensordata.service;
 
 import dev.bugi.sensor.device.entity.Device;
+import dev.bugi.sensor.device.entity.ChannelStatus;
+import dev.bugi.sensor.device.entity.DeviceStatus;
 import dev.bugi.sensor.device.entity.SensorChannel;
+import dev.bugi.sensor.device.repository.ChannelStatusRepository;
+import dev.bugi.sensor.alert.service.AlarmNotificationFactory;
 import dev.bugi.sensor.device.entity.SensorChannel.ThresholdDirection;
 import dev.bugi.sensor.factory.entity.Factory;
 import dev.bugi.sensor.factory.entity.Zone;
@@ -16,6 +20,7 @@ import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.autoconfigure.orm.jpa.TestEntityManager;
 import org.springframework.context.annotation.Import;
+import org.springframework.boot.autoconfigure.jackson.JacksonAutoConfiguration;
 
 import java.time.Instant;
 import java.util.LinkedHashMap;
@@ -34,7 +39,14 @@ import static org.assertj.core.api.Assertions.assertThat;
  *
  * UNIQUE(batch_id, channel_id) DB 거부는 SensorReadingRepositoryTest 에 이미 있어 중복하지 않는다.
  */
-@Import({ThresholdDetector.class, AccessControlService.class, SensorDataService.class})
+@Import({
+        ThresholdDetector.class,
+        AccessControlService.class,
+        SensorDataService.class,
+        AlarmNotificationFactory.class,
+        IngestReceiptService.class,
+        JacksonAutoConfiguration.class
+})
 class SensorDataServiceIntegrationTest extends AbstractPostgresTest {
 
     @Autowired
@@ -46,16 +58,21 @@ class SensorDataServiceIntegrationTest extends AbstractPostgresTest {
     @PersistenceContext
     EntityManager em;
 
+    @Autowired
+    ChannelStatusRepository channelStatusRepository;
+
     private Device persistDeviceWithChannels(String... channelCodes) {
         Factory f = tem.persist(Factory.builder().name("F").description(null).build());
         Zone z = tem.persist(Zone.builder().factory(f).name("Z").description(null).build());
         Device d = tem.persist(Device.builder()
                 .zone(z).code("D-" + UUID.randomUUID()).name("D")
                 .location("L").expectedIntervalSeconds(10).build());
+        tem.persist(new DeviceStatus(d));
         for (String code : channelCodes) {
-            tem.persist(SensorChannel.builder()
+            SensorChannel channel = tem.persist(SensorChannel.builder()
                     .device(d).code(code).unit("°R").quantityKind("temperature")
                     .thresholdValue(9999.0).thresholdDirection(ThresholdDirection.ABOVE).build());
+            channelStatusRepository.save(new ChannelStatus(channel));
         }
         tem.flush();
         return d;

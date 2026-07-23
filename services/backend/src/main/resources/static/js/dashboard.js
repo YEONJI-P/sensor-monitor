@@ -32,6 +32,8 @@
   let deviceAlerts = [];
   let showAllDeviceAlerts = false;
   let expandedDeviceAlertId = null;
+  let deviceEpisodes = [];
+  let episodesRequestId = 0;
   let statusFilter = 'all';
   const STATUS_FILTERS = [
     { key: 'all', label: '전체' },
@@ -127,6 +129,45 @@
         const reading = readingByBatch.get(String(alert.batchId));
         return { x: reading.x, y: reading.y, alert };
       }).sort((a, b) => a.x - b.x);
+  }
+
+  function normalizeEpisodeEvent(payload) {
+    if (!payload || typeof payload !== 'object') return null;
+    const episode = payload.episode && typeof payload.episode === 'object'
+      ? payload.episode : payload;
+    if (episode.id == null) return null;
+    const changeType = payload.changeType || payload.action || payload.eventType || null;
+    const normalized = { ...episode };
+    if (changeType === 'RESOLVED' && !normalized.status) normalized.status = 'RESOLVED';
+    if (changeType === 'OPEN' && !normalized.status) normalized.status = 'OPEN';
+    return { changeType, episode: normalized };
+  }
+
+  // 같은 episode의 지연 OPEN/ACK 이벤트가 이미 해제된 현재 카드를 되돌리지 않게 한다.
+  function mergeEpisodeState(current, incoming) {
+    if (!current) return incoming;
+    if (!incoming || String(current.id) !== String(incoming.id)) return current;
+    const currentAckAt = date(current.latestAcknowledgement && current.latestAcknowledgement.createdAt);
+    const incomingAckAt = date(incoming.latestAcknowledgement && incoming.latestAcknowledgement.createdAt);
+    const stateTime = (episode) => [episode.updatedAt, episode.resolvedAt, episode.openedAt]
+      .map(date).filter(Boolean).reduce((latest, value) =>
+        !latest || value.getTime() > latest.getTime() ? value : latest, null);
+    const currentTime = stateTime(current);
+    const incomingTime = stateTime(incoming);
+    const currentResolvedWins = current.status === 'RESOLVED'
+      && incoming.status !== 'RESOLVED';
+    const incomingIsOlder = currentTime && incomingTime
+      && incomingTime.getTime() < currentTime.getTime();
+    const merged = currentResolvedWins || incomingIsOlder
+      ? { ...current }
+      : { ...current, ...incoming };
+    if (currentAckAt && (!incomingAckAt
+        || incomingAckAt.getTime() < currentAckAt.getTime())) {
+      merged.latestAcknowledgement = current.latestAcknowledgement;
+    } else if (incoming.latestAcknowledgement) {
+      merged.latestAcknowledgement = incoming.latestAcknowledgement;
+    }
+    return merged;
   }
 
   function fmtTime(value) {
@@ -288,27 +329,33 @@
     return `<span class="freshness"><span class="lamp ${info.lamp}"></span>${escapeHtml(info.label)}</span>`;
   }
 
+  function activeEpisodeCount(device) {
+    const additive = Number(device && device.activeEpisodeCount);
+    return Number.isFinite(additive)
+      ? additive : (Number(device && device.currentAlarmCount) || 0);
+  }
+
   // 장치 카드 상태 스파인 + 상태 필터 칩이 공유하는 4버킷 분류.
   function classifyDevice(device) {
-    if ((Number(device.currentAlarmCount) || 0) > 0 || device.freshness === 'STALE') return 'alarm';
+    if (activeEpisodeCount(device) > 0 || device.freshness === 'STALE') return 'alarm';
     if (device.freshness === 'NEVER_SEEN') return 'warn';
     if (['NOT_MONITORED', 'PLANNED_OFFLINE', 'RESUMING'].includes(device.freshness)) return 'idle';
     return 'ok';
   }
 
   function isAttentionDevice(device) {
-    return (Number(device.currentAlarmCount) || 0) > 0 || device.freshness === 'STALE' || device.freshness === 'NEVER_SEEN';
+    return activeEpisodeCount(device) > 0 || device.freshness === 'STALE' || device.freshness === 'NEVER_SEEN';
   }
 
   function isAttentionAlarm(device) {
-    return (Number(device.currentAlarmCount) || 0) > 0 || device.freshness === 'STALE';
+    return activeEpisodeCount(device) > 0 || device.freshness === 'STALE';
   }
 
   function renderSummary() {
     const devices = allDevices().map((entry) => entry.device);
     const monitored = devices.filter((device) => !['NOT_MONITORED', 'PLANNED_OFFLINE', 'RESUMING'].includes(device.freshness));
     const online = monitored.filter((device) => device.freshness === 'ONLINE').length;
-    const alarmCount = devices.reduce((sum, device) => sum + (Number(device.currentAlarmCount) || 0), 0);
+    const alarmCount = devices.reduce((sum, device) => sum + activeEpisodeCount(device), 0);
     const latest = devices.map((device) => date(device.lastSeenAt)).filter(Boolean)
       .sort((a, b) => b.getTime() - a.getTime())[0];
     const hasStale = monitored.some((device) => device.freshness === 'STALE' || device.freshness === 'NEVER_SEEN');
@@ -328,18 +375,18 @@
       <div class="device-head"><div><h3>${escapeHtml(device.name || device.code || '이름 없는 장치')}</h3><div class="device-meta">${escapeHtml(location)}</div></div>${freshnessHtml(device.freshness)}</div>
       <div class="device-metrics">
         <div class="metric"><span>마지막 수신</span><b>${escapeHtml(fmtRelative(device.lastSeenAt))}</b></div>
-        <div class="metric"><span>알람 유지 중 채널</span><b>${Number(device.currentAlarmCount) || 0} 채널</b></div>
+        <div class="metric"><span>활성 episode</span><b>${activeEpisodeCount(device)} 건</b></div>
       </div>
     </button>`;
   }
 
   function attentionSummary(device) {
-    if ((Number(device.currentAlarmCount) || 0) > 0) {
+    if (activeEpisodeCount(device) > 0) {
       const channel = (device.channels || []).find((item) => item.inAlarm);
       if (channel) {
         return { text: `${channel.code} ${fmtNum(channel.latestValue)}${channel.unit || ''} ▲`, cls: 's-alarm' };
       }
-      return { text: '알람 유지 중', cls: 's-alarm' };
+      return { text: `활성 episode ${activeEpisodeCount(device)}건`, cls: 's-alarm' };
     }
     return { text: '수신 지연', cls: device.freshness === 'STALE' ? 's-alarm' : 's-warn' };
   }
@@ -364,10 +411,10 @@
         const rank = (entry) => isAttentionAlarm(entry.device) ? 0 : 1;
         const diff = rank(a) - rank(b);
         if (diff !== 0) return diff;
-        return (Number(b.device.currentAlarmCount) || 0) - (Number(a.device.currentAlarmCount) || 0);
+        return activeEpisodeCount(b.device) - activeEpisodeCount(a.device);
       });
     if (!entries.length) { band.innerHTML = ''; return; }
-    const channelAlarmCount = entries.reduce((sum, entry) => sum + (Number(entry.device.currentAlarmCount) || 0), 0);
+    const channelAlarmCount = entries.reduce((sum, entry) => sum + activeEpisodeCount(entry.device), 0);
     band.innerHTML = `<div class="attention">
       <div class="panel-head"><h3>주의 필요</h3><span class="attn-count">장치 ${entries.length}${channelAlarmCount ? ` · 채널 ${channelAlarmCount}` : ''}</span></div>
       ${entries.map(attentionRowHtml).join('')}
@@ -524,6 +571,8 @@
     $('detailFreshnessLamp').className = `lamp ${info.lamp}`;
     $('detailLastSeen').textContent = fmtRelative(device.lastSeenAt);
     $('detailLastSeenLamp').className = `lamp ${device.lastSeenAt ? 'ok' : 'idle'}`;
+    $('detailEpisodeCount').textContent = String(activeEpisodeCount(device));
+    $('detailEpisodeLamp').className = `lamp ${activeEpisodeCount(device) ? 'alarm' : 'ok'}`;
     renderChannelRows(device);
     renderSelStrip();
 
@@ -544,9 +593,11 @@
     if (!entry) return;
     currentDeviceId = String(deviceId);
     deviceAlerts = [];
+    deviceEpisodes = [];
     showAllDeviceAlerts = false;
     expandedDeviceAlertId = null;
     renderDeviceAlerts();
+    renderDeviceEpisodes();
     if (!(entry.device.channels || []).some((channel) => String(channel.id) === String(currentChannelId))) {
       currentChannelId = entry.device.channels && entry.device.channels.length ? String(entry.device.channels[0].id) : null;
     }
@@ -554,7 +605,7 @@
     $('overviewView').classList.add('hidden');
     $('detailView').classList.remove('hidden');
     renderDetail();
-    await Promise.all([loadReadings(), loadChannelAlerts(), loadDeviceAlerts()]);
+    await Promise.all([loadReadings(), loadChannelAlerts(), loadDeviceAlerts(), loadDeviceEpisodes()]);
   }
 
   async function loadOverview() {
@@ -565,6 +616,14 @@
       return false;
     }
     try { overview = await res.json(); } catch { return false; }
+    // 구 backend payload는 additive 필드가 없으므로 기존 channel alarm count로 폴백한다.
+    (overview.factories || []).forEach((factory) => (factory.zones || []).forEach((zone) =>
+      (zone.devices || []).forEach((device) => {
+        if (device.activeEpisodeCount == null) device.activeEpisodeCount = Number(device.currentAlarmCount) || 0;
+        (device.channels || []).forEach((channel) => {
+          if (!Object.prototype.hasOwnProperty.call(channel, 'activeEpisodeId')) channel.activeEpisodeId = null;
+        });
+      })));
     rebuildDeviceIndex();
     renderOverview();
     $('refreshTag').textContent = '기준 ' + fmtTime(overview.generatedAt);
@@ -657,13 +716,14 @@
     renderChart();
   }
 
-  // AlertResponse에는 model/source 필드가 없어 severity만 footer에 표기한다.
   function alertDetailHtml(alert) {
     const blocks = [];
     if (alert.evidence) blocks.push(`<div class="ab"><div class="ab-h eyebrow">근거</div><p>${escapeHtml(alert.evidence)}</p></div>`);
     if (alert.recommendation) blocks.push(`<div class="ab action"><div class="ab-h eyebrow">권장 조치</div><p>${escapeHtml(alert.recommendation)}</p></div>`);
     const severityTagCls = alert.severity === 'CRITICAL' ? 'tag-alarm' : alert.severity === 'WARNING' ? 'tag-brand' : '';
-    blocks.push(`<div class="ab-foot"><span class="tag ${severityTagCls}">${escapeHtml(alert.severity || 'INFO')}</span></div>`);
+    const lifecycle = [alert.type, alert.scope, alert.notificationReason,
+      alert.episodeId != null ? `episode #${alert.episodeId}` : null].filter(Boolean).join(' · ');
+    blocks.push(`<div class="ab-foot"><span class="tag ${severityTagCls}">${escapeHtml(alert.severity || 'INFO')}</span>${lifecycle ? `<span class="mono dim">${escapeHtml(lifecycle)}</span>` : ''}</div>`);
     return blocks.join('');
   }
 
@@ -709,6 +769,116 @@
       expandedDeviceAlertId = null;
     }
     renderDeviceAlerts();
+  }
+
+  const EPISODE_TYPE = {
+    THRESHOLD: '임계 이탈', DEVICE_SILENCE: '장치 수신 끊김', ZONE_SILENCE: '구역 수신 끊김',
+  };
+  const RESOLUTION_REASON = {
+    RECOVERED: '정상 복구', CONFIG_CHANGED: '설정 변경', PLANNED_OFFLINE: '계획 비가동',
+    RESUME_GRACE: '재개 유예', RECLASSIFIED: '범위 재분류', MONITORING_DISABLED: '감시 해제',
+  };
+  const SEVERITY_RANK = { INFO: 0, WARNING: 1, CRITICAL: 2 };
+
+  function episodeAffectsEntry(episode, entry) {
+    if (!episode || !entry) return false;
+    if (episode.deviceId != null && String(episode.deviceId) === String(entry.device.id)) return true;
+    if (episode.zoneId != null && String(episode.zoneId) === String(entry.zone.id)) return true;
+    return episode.channelId != null && (entry.device.channels || [])
+      .some((channel) => String(channel.id) === String(episode.channelId));
+  }
+
+  function canAcknowledge(episode) {
+    if (!episode || episode.status !== 'OPEN' || (typeof Auth !== 'undefined' && Auth.getRole() === 'VIEWER')) return false;
+    const ack = episode.latestAcknowledgement;
+    const acknowledgedCurrentNotification = ack
+      && (SEVERITY_RANK[ack.ackSeverity] || 0) >= (SEVERITY_RANK[episode.currentSeverity] || 0)
+      && (!episode.lastNotifiedAt || (date(ack.createdAt) && date(ack.createdAt) >= date(episode.lastNotifiedAt)));
+    return !acknowledgedCurrentNotification;
+  }
+
+  function episodeItemHtml(episode) {
+    const open = episode.status === 'OPEN';
+    const lamp = episode.currentSeverity === 'CRITICAL' ? 'alarm'
+      : episode.currentSeverity === 'WARNING' ? 'warn' : 'ok';
+    const ack = episode.latestAcknowledgement;
+    const scopeName = episode.channelId != null ? channelName(currentEntry().device, episode.channelId)
+      : episode.scopeType === 'ZONE' ? '구역' : '장치';
+    const reason = !open
+      ? (RESOLUTION_REASON[episode.resolutionReason] || episode.resolutionReason || '사유 미상') : null;
+    return `<li class="episode-item" data-episode-id="${escapeHtml(String(episode.id))}">
+      <div class="episode-head"><div class="episode-title"><span class="lamp ${lamp}"></span><strong>${escapeHtml(EPISODE_TYPE[episode.type] || episode.type || 'Alarm')}</strong><span class="tag">${escapeHtml(scopeName)}</span><span class="tag">${escapeHtml(episode.currentSeverity || 'INFO')}</span></div><span class="alarm-time">${escapeHtml(fmtDateTime(open ? episode.openedAt : episode.resolvedAt))}</span></div>
+      <div class="episode-meta">#${escapeHtml(String(episode.id))} · ${open ? 'OPEN' : `RESOLVED · ${escapeHtml(reason)}`}</div>
+      ${episode.evidence ? `<div class="episode-copy">${escapeHtml(episode.evidence)}</div>` : ''}
+      <div class="episode-actions">${ack ? `<span class="tag tag-signal">확인 · ${escapeHtml(ack.userName || `user #${ack.userId}`)} · ${escapeHtml(fmtDateTime(ack.createdAt))}</span>` : '<span class="tag">미확인</span>'}${canAcknowledge(episode) ? `<button type="button" class="btn btn-sm btn-ghost" data-episode-ack="${escapeHtml(String(episode.id))}">확인 처리</button>` : ''}</div>
+    </li>`;
+  }
+
+  function renderDeviceEpisodes() {
+    const entry = currentEntry();
+    if (!entry) return;
+    const sorted = deviceEpisodes.slice().sort((left, right) => {
+      if ((left.status === 'OPEN') !== (right.status === 'OPEN')) return left.status === 'OPEN' ? -1 : 1;
+      return (date(right.updatedAt || right.openedAt) || 0) - (date(left.updatedAt || left.openedAt) || 0);
+    });
+    const active = sorted.filter((episode) => episode.status === 'OPEN').length;
+    $('episodeCount').textContent = `${active} 활성`;
+    $('episodeList').innerHTML = sorted.length
+      ? sorted.slice(0, 12).map(episodeItemHtml).join('')
+      : '<li class="empty">이 장치와 관련된 episode가 없습니다.</li>';
+  }
+
+  function mergeDeviceEpisode(incoming) {
+    const index = deviceEpisodes.findIndex((episode) => String(episode.id) === String(incoming.id));
+    if (index < 0) deviceEpisodes.push(incoming);
+    else deviceEpisodes[index] = mergeEpisodeState(deviceEpisodes[index], incoming);
+  }
+
+  async function loadDeviceEpisodes() {
+    const entry = currentEntry();
+    if (!entry) return;
+    const requestedDevice = String(entry.device.id);
+    const requestId = ++episodesRequestId;
+    const urls = [
+      `/alarm-episodes?deviceId=${encodeURIComponent(entry.device.id)}&size=100&sort=openedAt,desc`,
+    ];
+    if (entry.zone && entry.zone.id != null) {
+      urls.push(`/alarm-episodes?zoneId=${encodeURIComponent(entry.zone.id)}&size=100&sort=openedAt,desc`);
+    }
+    const responses = await Promise.all(urls.map((url) => Auth.apiFetch(url)));
+    if (responses.some((res) => !res || !res.ok)) return;
+    let pages;
+    try { pages = await Promise.all(responses.map((res) => res.json())); } catch { return; }
+    if (requestId !== episodesRequestId || !currentEntry()
+        || requestedDevice !== String(currentEntry().device.id)) return;
+    const byId = new Map();
+    pages.flatMap((page) => Array.isArray(page.content) ? page.content : [])
+      .filter((episode) => episodeAffectsEntry(episode, currentEntry()))
+      .forEach((episode) => byId.set(String(episode.id), episode));
+    const incoming = [...byId.values()];
+    const previous = new Map(deviceEpisodes.map((episode) => [String(episode.id), episode]));
+    deviceEpisodes = incoming.map((episode) =>
+      mergeEpisodeState(previous.get(String(episode.id)), episode));
+    previous.forEach((episode, id) => {
+      if (!deviceEpisodes.some((item) => String(item.id) === id)
+          && episode.status === 'RESOLVED') deviceEpisodes.push(episode);
+    });
+    renderDeviceEpisodes();
+  }
+
+  async function acknowledgeEpisode(episodeId, button) {
+    if (button) button.disabled = true;
+    const res = await Auth.apiFetch(`/alarm-episodes/${encodeURIComponent(episodeId)}/ack`, { method: 'POST' });
+    if (!res || !res.ok) {
+      if (button) button.disabled = false;
+      toast(res && res.status === 403 ? 'episode 확인 권한이 없습니다.' : 'episode 확인 처리에 실패했습니다.', true);
+      return;
+    }
+    let episode;
+    try { episode = await res.json(); } catch { return; }
+    mergeDeviceEpisode(episode);
+    renderDeviceEpisodes();
+    toast('episode를 확인 처리했습니다.');
   }
 
   function appendLivePoint(batchId, value, anomaly, observedAt) {
@@ -773,6 +943,18 @@
         await Promise.all(refreshes);
       }
     });
+    sse.addEventListener('alarm-episode', async (event) => {
+      let normalized;
+      try { normalized = normalizeEpisodeEvent(JSON.parse(event.data)); } catch { return; }
+      if (!normalized) return;
+      const entry = currentEntry();
+      if (entry && episodeAffectsEntry(normalized.episode, entry)) {
+        mergeDeviceEpisode(normalized.episode);
+        renderDeviceEpisodes();
+      }
+      // 서버 정본을 다시 읽어 additive count/channel active id를 보정한다.
+      await loadOverview();
+    });
     sse.onerror = async () => {
       setSseLamp('alarm');
       if (!sse || sse.readyState !== EventSource.CLOSED || sseRecovering) {
@@ -801,7 +983,7 @@
   async function resync() {
     const wasDetail = currentDeviceId != null;
     await loadOverview();
-    if (wasDetail && currentEntry()) await Promise.all([loadReadings(), loadChannelAlerts(), loadDeviceAlerts()]);
+    if (wasDetail && currentEntry()) await Promise.all([loadReadings(), loadChannelAlerts(), loadDeviceAlerts(), loadDeviceEpisodes()]);
   }
 
   function startPolling() {
@@ -834,6 +1016,10 @@
     $('alarmListToggle').addEventListener('click', () => {
       showAllDeviceAlerts = !showAllDeviceAlerts;
       renderDeviceAlerts();
+    });
+    $('episodeList').addEventListener('click', (event) => {
+      const button = event.target.closest('[data-episode-ack]');
+      if (button) acknowledgeEpisode(button.dataset.episodeAck, button);
     });
     $('channelRows').addEventListener('click', async (event) => {
       const card = event.target.closest('[data-channel-id]');
@@ -876,7 +1062,10 @@
   }
 
   if (typeof module === 'object' && module.exports) {
-    module.exports = { normalizeReadings, filterTimeWindow, downsampleEvenly, mergeReadings, matchAlertMarkers };
+    module.exports = {
+      normalizeReadings, filterTimeWindow, downsampleEvenly, mergeReadings, matchAlertMarkers,
+      normalizeEpisodeEvent, mergeEpisodeState,
+    };
   }
   if (typeof document !== 'undefined') document.addEventListener('DOMContentLoaded', boot);
 })();

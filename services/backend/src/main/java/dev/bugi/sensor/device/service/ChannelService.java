@@ -1,19 +1,30 @@
 package dev.bugi.sensor.device.service;
 
+import dev.bugi.sensor.alert.entity.AlarmResolutionReason;
+import dev.bugi.sensor.alert.dto.AlarmEpisodeResponse;
+import dev.bugi.sensor.alert.dto.AlarmEpisodeSsePayload;
+import dev.bugi.sensor.alert.repository.AlarmEpisodeRepository;
 import dev.bugi.sensor.device.dto.ChannelCreateRequest;
 import dev.bugi.sensor.device.dto.ChannelResponse;
 import dev.bugi.sensor.device.dto.ChannelUpdateRequest;
+import dev.bugi.sensor.device.entity.ChannelStatus;
 import dev.bugi.sensor.device.entity.Device;
 import dev.bugi.sensor.device.entity.SensorChannel;
+import dev.bugi.sensor.device.repository.ChannelStatusRepository;
 import dev.bugi.sensor.device.repository.DeviceRepository;
 import dev.bugi.sensor.device.repository.SensorChannelRepository;
 import dev.bugi.sensor.global.service.AccessControlService;
+import dev.bugi.sensor.sse.SseBroadcastEvent;
 import dev.bugi.sensor.user.entity.User;
+import jakarta.persistence.EntityManager;
 import lombok.RequiredArgsConstructor;
 import org.springframework.stereotype.Service;
+import org.springframework.context.ApplicationEventPublisher;
 import org.springframework.transaction.annotation.Transactional;
 
+import java.time.Clock;
 import java.util.List;
+import java.util.Objects;
 
 @Service
 @RequiredArgsConstructor
@@ -21,7 +32,12 @@ public class ChannelService {
 
     private final DeviceRepository deviceRepository;
     private final SensorChannelRepository sensorChannelRepository;
+    private final ChannelStatusRepository channelStatusRepository;
+    private final AlarmEpisodeRepository alarmEpisodeRepository;
     private final AccessControlService accessControlService;
+    private final EntityManager entityManager;
+    private final ApplicationEventPublisher eventPublisher;
+    private final Clock clock;
 
     /**
      * 접근 가능한 채널 목록. deviceId 가 있으면 그 장치의 채널만(접근 검사 후), 없으면 접근 범위 전체.
@@ -60,6 +76,7 @@ public class ChannelService {
                 .thresholdDirection(request.getThresholdDirection())
                 .build();
         sensorChannelRepository.save(channel);
+        channelStatusRepository.save(new ChannelStatus(channel));
         return ChannelResponse.from(channel);
     }
 
@@ -70,6 +87,27 @@ public class ChannelService {
         SensorChannel channel = accessControlService.getChannel(channelId);
         accessControlService.assertCanAccessChannel(user, channel);
         validateThreshold(request.getThresholdValue(), request.getThresholdDirection());
+
+        ChannelStatus status = channelStatusRepository.findByIdForUpdate(channelId)
+                .orElseThrow(() -> new IllegalStateException(
+                        "channel_status가 없습니다. migration/create 경계를 확인하세요: " + channelId));
+        // ingest와 같은 coordination row를 얻은 뒤, 대기 전에 읽은 설정 스냅샷을 버린다.
+        entityManager.refresh(channel);
+        boolean thresholdChanged =
+                !Objects.equals(channel.getThresholdValue(), request.getThresholdValue())
+                        || !Objects.equals(channel.getThresholdDirection(), request.getThresholdDirection());
+        if (thresholdChanged) {
+            alarmEpisodeRepository.findOpenThresholdForUpdate(channelId)
+                    .ifPresent(episode -> {
+                        episode.resolve(clock.instant(), AlarmResolutionReason.CONFIG_CHANGED);
+                        eventPublisher.publishEvent(new SseBroadcastEvent(
+                                "alarm-episode", episode.getDevice().getId(),
+                                new AlarmEpisodeSsePayload(
+                                        AlarmEpisodeSsePayload.ChangeType.RESOLVED,
+                                        AlarmEpisodeResponse.from(episode, null))));
+                    });
+            status.clearAlarm();
+        }
 
         channel.update(request.getUnit(), request.getQuantityKind(),
                 request.getThresholdValue(), request.getThresholdDirection());

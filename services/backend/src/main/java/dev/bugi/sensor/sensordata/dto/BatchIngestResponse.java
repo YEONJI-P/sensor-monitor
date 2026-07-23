@@ -14,6 +14,15 @@ public record BatchIngestResponse(
         Instant observedAt,
         Instant receivedAt,
         int savedCount,
-        List<RejectedReading> rejected
+        List<RejectedReading> rejected,
+        String eventId,
+        int stateAppliedCount
 ) {
+    /** 기존 응답 생성 코드 호환 생성자. 새 통계는 멱등 키 없음/상태 미적용으로 둔다. */
+    public BatchIngestResponse(Long batchId, Long deviceId, String deviceCode,
+                               Instant observedAt, Instant receivedAt, int savedCount,
+                               List<RejectedReading> rejected) {
+        this(batchId, deviceId, deviceCode, observedAt, receivedAt,
+                savedCount, rejected, null, 0);
+    }
 }

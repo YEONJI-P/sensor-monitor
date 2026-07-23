@@ -40,6 +40,9 @@ public class SseController {
         User user = userRepository.findByEmployeeId(jwtUtil.getEmployeeId(token))
                 .orElseThrow(() -> new ResponseStatusException(HttpStatus.UNAUTHORIZED, "존재하지 않는 사용자입니다."));
         Set<Long> deviceIds = new HashSet<>(accessControlService.getAccessibleDeviceIds(user));
-        return sseService.subscribe(deviceIds);
+        Set<Long> zoneIds = accessControlService.getAccessibleZones(user).stream()
+                .map(zone -> zone.getId())
+                .collect(java.util.stream.Collectors.toSet());
+        return sseService.subscribe(deviceIds, zoneIds);
     }
 }

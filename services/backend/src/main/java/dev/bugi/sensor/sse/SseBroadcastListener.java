@@ -18,6 +18,7 @@ public class SseBroadcastListener {
 
     @TransactionalEventListener(phase = TransactionPhase.AFTER_COMMIT)
     public void onBroadcast(SseBroadcastEvent event) {
-        sseService.broadcast(event.event(), event.deviceId(), event.payload());
+        sseService.broadcast(
+                event.event(), event.deviceId(), event.zoneId(), event.payload());
     }
 }

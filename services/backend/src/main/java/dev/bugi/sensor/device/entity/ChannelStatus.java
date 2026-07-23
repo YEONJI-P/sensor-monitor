@@ -1,5 +1,7 @@
 package dev.bugi.sensor.device.entity;
 
+import dev.bugi.sensor.alert.entity.AlarmEpisode;
+import dev.bugi.sensor.alert.entity.AlarmType;
 import jakarta.persistence.*;
 import lombok.Getter;
 import lombok.NoArgsConstructor;
@@ -34,6 +36,15 @@ public class ChannelStatus {
     // 마지막 발화 시각(UTC).
     private Instant lastAlertAt;
 
+    // 같은 채널에서 관측 시각이 역행한 재전송을 상태 전이에서 제외하기 위한 watermark.
+    private Instant lastEvaluatedObservedAt;
+    private Long lastEvaluatedBatchId;
+
+    // alarm_episode가 정본이고 이 FK는 hot-path 조회용 mirror다.
+    @ManyToOne(fetch = FetchType.LAZY)
+    @JoinColumn(name = "active_episode_id")
+    private AlarmEpisode activeEpisode;
+
     public ChannelStatus(SensorChannel channel) {
         this.channel = channel;
     }
@@ -44,8 +55,47 @@ public class ChannelStatus {
         this.lastAlertAt = at;
     }
 
+    public void enterAlarm(AlarmEpisode episode, Instant at) {
+        if (episode.getAlarmType() != AlarmType.THRESHOLD
+                || episode.getChannel() == null
+                || !episode.getChannel().getId().equals(channelId)) {
+            throw new IllegalArgumentException("채널과 일치하는 THRESHOLD episode만 mirror할 수 있습니다");
+        }
+        this.activeEpisode = episode;
+        enterAlarm(at);
+    }
+
+    public void mirror(AlarmEpisode episode, Instant lastAlertAt) {
+        this.activeEpisode = episode;
+        this.inAlarm = true;
+        this.lastAlertAt = lastAlertAt;
+    }
+
+    public boolean shouldEvaluate(Instant observedAt, Long batchId) {
+        if (lastEvaluatedObservedAt == null) {
+            return true;
+        }
+        int observedOrder = observedAt.compareTo(lastEvaluatedObservedAt);
+        if (observedOrder != 0) {
+            return observedOrder > 0;
+        }
+        if (lastEvaluatedBatchId == null) {
+            return true;
+        }
+        return batchId != null && batchId > lastEvaluatedBatchId;
+    }
+
+    public void markEvaluated(Instant observedAt, Long batchId) {
+        if (!shouldEvaluate(observedAt, batchId)) {
+            throw new IllegalArgumentException("마지막 평가 cursor 이하의 판독은 기록할 수 없습니다");
+        }
+        this.lastEvaluatedObservedAt = observedAt;
+        this.lastEvaluatedBatchId = batchId;
+    }
+
     /** 임계값 아래 여유 구간까지 복귀: 알람 해제(알림은 만들지 않는다). */
     public void clearAlarm() {
         this.inAlarm = false;
+        this.activeEpisode = null;
     }
 }

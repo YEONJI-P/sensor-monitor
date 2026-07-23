@@ -4,6 +4,7 @@ import dev.bugi.sensor.device.dto.DeviceRegisterRequest;
 import dev.bugi.sensor.device.dto.DeviceUpdateRequest;
 import dev.bugi.sensor.device.entity.Device;
 import dev.bugi.sensor.device.repository.DeviceRepository;
+import dev.bugi.sensor.device.repository.DeviceStatusRepository;
 import dev.bugi.sensor.global.service.AccessControlService;
 import dev.bugi.sensor.factory.entity.Zone;
 import dev.bugi.sensor.factory.entity.Factory;
@@ -29,6 +30,7 @@ import static org.mockito.Mockito.*;
 class DeviceServiceTest {
 
     @Mock DeviceRepository deviceRepository;
+    @Mock DeviceStatusRepository deviceStatusRepository;
     @Mock ZoneRepository zoneRepository;
     @Mock AccessControlService accessControlService;
 

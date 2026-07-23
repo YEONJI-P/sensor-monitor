@@ -5,6 +5,7 @@ import dev.bugi.sensor.admin.service.ZoneService;
 import dev.bugi.sensor.admin.service.FactoryService;
 import dev.bugi.sensor.admin.service.FactoryCalendarAdminService;
 import dev.bugi.sensor.alert.service.AlertService;
+import dev.bugi.sensor.alert.service.AlarmEpisodeService;
 import dev.bugi.sensor.auth.dto.FactoryOptionResponse;
 import dev.bugi.sensor.auth.service.AuthService;
 import dev.bugi.sensor.auth.util.JwtUtil;
@@ -73,6 +74,8 @@ public class SecurityConfigTest {
     DashboardOverviewService dashboardOverviewService;
     @MockitoBean
     AlertService alertService;
+    @MockitoBean
+    AlarmEpisodeService alarmEpisodeService;
     @MockitoBean
     AdminService adminService;
     @MockitoBean
@@ -510,6 +513,76 @@ public class SecurityConfigTest {
     void get_alerts_factory_admin_ok() throws Exception {
         mockMvc.perform(get("/alerts"))
                 .andExpect(status().is(not(403)));
+    }
+
+    @Test
+    void get_alarm_episodes_no_auth_is_unauthorized() throws Exception {
+        mockMvc.perform(get("/alarm-episodes"))
+                .andExpect(status().isUnauthorized());
+        verifyNoInteractions(alarmEpisodeService);
+    }
+
+    @Test
+    @WithMockUser(roles = "VIEWER")
+    void get_alarm_episodes_viewer_is_allowed() throws Exception {
+        mockMvc.perform(get("/alarm-episodes"))
+                .andExpect(status().isOk());
+    }
+
+    @Test
+    @WithMockUser(username = "MEMBER1", roles = "MEMBER")
+    void get_alarm_episodes_maps_all_optional_filters() throws Exception {
+        given(alarmEpisodeService.getEpisodes(
+                org.mockito.ArgumentMatchers.eq("MEMBER1"),
+                org.mockito.ArgumentMatchers.eq(
+                        dev.bugi.sensor.alert.entity.AlarmEpisodeStatus.OPEN),
+                org.mockito.ArgumentMatchers.eq(
+                        dev.bugi.sensor.alert.entity.AlarmType.THRESHOLD),
+                org.mockito.ArgumentMatchers.eq(
+                        dev.bugi.sensor.alert.entity.AlarmScopeType.CHANNEL),
+                org.mockito.ArgumentMatchers.eq(7L),
+                org.mockito.ArgumentMatchers.eq(11L),
+                org.mockito.ArgumentMatchers.eq(3L),
+                any(org.springframework.data.domain.Pageable.class)))
+                .willReturn(org.springframework.data.domain.Page.empty());
+
+        mockMvc.perform(get("/alarm-episodes")
+                        .param("status", "OPEN")
+                        .param("type", "THRESHOLD")
+                        .param("scopeType", "CHANNEL")
+                        .param("deviceId", "7")
+                        .param("channelId", "11")
+                        .param("zoneId", "3"))
+                .andExpect(status().isOk());
+    }
+
+    @Test
+    @WithMockUser(roles = "MEMBER")
+    void ack_alarm_episode_member_is_allowed() throws Exception {
+        mockMvc.perform(post("/alarm-episodes/1/ack"))
+                .andExpect(status().isOk());
+    }
+
+    @Test
+    @WithMockUser(roles = "FACTORY_ADMIN")
+    void ack_alarm_episode_factory_admin_is_allowed() throws Exception {
+        mockMvc.perform(post("/alarm-episodes/1/ack"))
+                .andExpect(status().isOk());
+    }
+
+    @Test
+    @WithMockUser(roles = "SYSTEM_ADMIN")
+    void ack_alarm_episode_system_admin_is_allowed() throws Exception {
+        mockMvc.perform(post("/alarm-episodes/1/ack"))
+                .andExpect(status().isOk());
+    }
+
+    @Test
+    @WithMockUser(roles = "VIEWER")
+    void ack_alarm_episode_viewer_is_forbidden() throws Exception {
+        mockMvc.perform(post("/alarm-episodes/1/ack"))
+                .andExpect(status().isForbidden());
+        verifyNoInteractions(alarmEpisodeService);
     }
 
     @Test

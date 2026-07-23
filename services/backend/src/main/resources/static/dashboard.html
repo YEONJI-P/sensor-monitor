@@ -56,6 +56,15 @@
     .alarm-message { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: .8rem; line-height: 1.4; }
     .alarm-time { color: var(--text-faint); font-family: var(--font-mono); font-size: .7rem; white-space: nowrap; }
     .alarm-detail { padding: .15rem 1rem 1rem; display: flex; flex-direction: column; gap: .75rem; }
+    .episode-panel { max-height: 390px; min-height: 0; display: flex; flex-direction: column; overflow: hidden; }
+    .episode-list { list-style: none; overflow-y: auto; min-height: 0; }
+    .episode-item { padding: .8rem 1rem; border-bottom: 1px solid var(--line-soft); }
+    .episode-item:last-child { border-bottom: 0; }
+    .episode-head, .episode-actions { display: flex; align-items: center; justify-content: space-between; gap: .7rem; }
+    .episode-title { display: flex; align-items: center; gap: .45rem; flex-wrap: wrap; }
+    .episode-meta { color: var(--text-faint); font-family: var(--font-mono); font-size: .7rem; margin-top: .35rem; }
+    .episode-copy { color: var(--text-dim); font-size: .8rem; line-height: 1.45; margin-top: .45rem; }
+    .episode-actions { justify-content: flex-start; margin-top: .65rem; }
     @media (max-width: 960px) {
       .device-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
     }
@@ -103,7 +112,7 @@
     <div class="panel summary" style="margin-bottom:1.5rem">
       <div class="cell"><span class="lamp idle" id="summaryFreshnessLamp"></span><div><div class="val" id="summaryFreshness">—</div><div class="lbl">온라인 / 전체 장치</div></div></div>
       <div class="cell"><span class="lamp idle" id="summaryLastSeenLamp"></span><div><div class="val" id="summaryLastSeen">—</div><div class="lbl">마지막 수신</div></div></div>
-      <div class="cell"><span class="lamp idle" id="summaryAlarmLamp"></span><div><div class="val" id="summaryAlarm">—</div><div class="lbl">알람 유지 중 채널</div></div></div>
+      <div class="cell"><span class="lamp idle" id="summaryAlarmLamp"></span><div><div class="val" id="summaryAlarm">—</div><div class="lbl">활성 alarm episode</div></div></div>
     </div>
     <div id="attentionBand"></div>
     <div id="statusFilters" class="filters"></div>
@@ -121,9 +130,10 @@
       </div>
       <span id="detailFreshness" class="tag"></span>
     </div>
-    <div class="panel summary cols-2" style="margin-bottom:1.35rem">
+    <div class="panel summary" style="margin-bottom:1.35rem">
       <div class="cell"><span class="lamp idle" id="detailFreshnessLamp"></span><div><div class="val" id="detailFreshnessValue">—</div><div class="lbl">freshness</div></div></div>
       <div class="cell"><span class="lamp idle" id="detailLastSeenLamp"></span><div><div class="val" id="detailLastSeen">—</div><div class="lbl">마지막 수신</div></div></div>
+      <div class="cell"><span class="lamp idle" id="detailEpisodeLamp"></span><div><div class="val" id="detailEpisodeCount">0</div><div class="lbl">활성 episode</div></div></div>
     </div>
 
     <div class="dpane">
@@ -152,6 +162,10 @@
             <div class="empty" id="lineEmpty">채널을 선택하면 최근 판독이 표시됩니다.</div>
             <canvas id="lineChart" class="hidden"></canvas>
           </div>
+        </div>
+        <div class="panel episode-panel">
+          <div class="panel-head"><h3>Alarm episodes</h3><span class="tag" id="episodeCount">0 활성</span></div>
+          <ul id="episodeList" class="episode-list"><li class="empty">episode를 불러오는 중입니다.</li></ul>
         </div>
         <div class="panel alarm-panel">
           <div class="panel-head"><h3>장치 최근 알림</h3><button id="alarmListToggle" class="btn btn-sm btn-ghost hidden" type="button" aria-expanded="false" aria-controls="alarmList">최근 20건 보기</button></div>

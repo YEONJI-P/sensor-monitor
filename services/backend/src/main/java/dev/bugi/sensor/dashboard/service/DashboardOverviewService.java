@@ -1,5 +1,8 @@
 package dev.bugi.sensor.dashboard.service;
 
+import dev.bugi.sensor.alert.entity.AlarmEpisode;
+import dev.bugi.sensor.alert.entity.AlarmEpisodeStatus;
+import dev.bugi.sensor.alert.repository.AlarmEpisodeRepository;
 import dev.bugi.sensor.dashboard.dto.DashboardOverviewResponse;
 import dev.bugi.sensor.dashboard.dto.DashboardOverviewResponse.ChannelOverview;
 import dev.bugi.sensor.dashboard.dto.DashboardOverviewResponse.DeviceOverview;
@@ -10,6 +13,7 @@ import dev.bugi.sensor.device.entity.ChannelStatus;
 import dev.bugi.sensor.device.entity.Device;
 import dev.bugi.sensor.device.entity.DeviceStatus;
 import dev.bugi.sensor.device.entity.SensorChannel;
+import dev.bugi.sensor.device.freshness.FreshnessPolicy;
 import dev.bugi.sensor.device.repository.ChannelStatusRepository;
 import dev.bugi.sensor.device.repository.DeviceRepository;
 import dev.bugi.sensor.device.repository.DeviceStatusRepository;
@@ -30,7 +34,6 @@ import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
 import java.time.Clock;
-import java.time.Duration;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.EnumSet;
@@ -39,6 +42,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.function.Function;
 import java.util.stream.Collectors;
+import org.springframework.data.jpa.domain.Specification;
 
 @Service
 @RequiredArgsConstructor
@@ -46,7 +50,6 @@ public class DashboardOverviewService {
 
     private static final String UNASSIGNED_FACTORY = "미지정 공장";
     private static final String UNASSIGNED_ZONE = "미지정 구역";
-    private static final long FRESHNESS_GRACE_MULTIPLIER = 2L;
     private static final EnumSet<Role> ALLOWED_ROLES =
             EnumSet.of(Role.SYSTEM_ADMIN, Role.FACTORY_ADMIN, Role.MEMBER, Role.VIEWER);
 
@@ -55,6 +58,7 @@ public class DashboardOverviewService {
     private final DeviceStatusRepository deviceStatusRepository;
     private final SensorChannelRepository sensorChannelRepository;
     private final ChannelStatusRepository channelStatusRepository;
+    private final AlarmEpisodeRepository alarmEpisodeRepository;
     private final SensorReadingRepository sensorReadingRepository;
     private final ThresholdDetector thresholdDetector;
     private final OperatingCalendarService operatingCalendarService;
@@ -91,6 +95,32 @@ public class DashboardOverviewService {
                 : sensorReadingRepository.findLatestByChannelIds(channelIds).stream()
                 .collect(Collectors.toMap(LatestReadingProjection::getChannelId, Function.identity()));
 
+        List<Long> zoneIds = devices.stream()
+                .map(Device::getZone).filter(java.util.Objects::nonNull)
+                .map(Zone::getId).distinct().toList();
+        List<AlarmEpisode> activeEpisodes = alarmEpisodeRepository.findAll(
+                activeEpisodeSpecification(deviceIds, zoneIds));
+        Map<Long, Long> activeEpisodeCountByDevice = new LinkedHashMap<>();
+        Map<Long, Long> activeEpisodeIdByChannel = new LinkedHashMap<>();
+        Map<Long, List<Long>> deviceIdsByZone = devices.stream()
+                .filter(device -> device.getZone() != null)
+                .collect(Collectors.groupingBy(device -> device.getZone().getId(),
+                        LinkedHashMap::new,
+                        Collectors.mapping(Device::getId, Collectors.toList())));
+        for (AlarmEpisode episode : activeEpisodes) {
+            if (episode.getDevice() != null) {
+                activeEpisodeCountByDevice.merge(episode.getDevice().getId(), 1L, Long::sum);
+            } else if (episode.getZone() != null) {
+                for (Long affectedDeviceId :
+                        deviceIdsByZone.getOrDefault(episode.getZone().getId(), List.of())) {
+                    activeEpisodeCountByDevice.merge(affectedDeviceId, 1L, Long::sum);
+                }
+            }
+            if (episode.getChannel() != null) {
+                activeEpisodeIdByChannel.put(episode.getChannel().getId(), episode.getId());
+            }
+        }
+
         Map<Long, List<SensorChannel>> channelsByDevice = channels.stream()
                 .collect(Collectors.groupingBy(c -> c.getDevice().getId(), LinkedHashMap::new, Collectors.toList()));
 
@@ -114,7 +144,8 @@ public class DashboardOverviewService {
             List<ChannelOverview> channelOverviews = channelsByDevice
                     .getOrDefault(device.getId(), List.of()).stream()
                     .map(channel -> toChannelOverview(channel, channelStatuses.get(channel.getId()),
-                            latestReadings.get(channel.getId())))
+                            latestReadings.get(channel.getId()),
+                            activeEpisodeIdByChannel.get(channel.getId())))
                     .toList();
             int alarmCount = (int) channelOverviews.stream().filter(ChannelOverview::inAlarm).count();
             OperatingDecision operatingDecision = factory == null
@@ -125,7 +156,8 @@ public class DashboardOverviewService {
                     device.getId(), device.getCode(), device.getName(), device.getLocation(),
                     device.getExpectedIntervalSeconds(), lastSeenAt,
                     freshness(device.getExpectedIntervalSeconds(), lastSeenAt, generatedAt, operatingDecision),
-                    alarmCount, channelOverviews);
+                    alarmCount, channelOverviews,
+                    activeEpisodeCountByDevice.getOrDefault(device.getId(), 0L));
 
             factoryGroups.computeIfAbsent(factoryKey, FactoryGroup::new)
                     .zones.computeIfAbsent(zoneKey, ZoneGroup::new)
@@ -139,7 +171,8 @@ public class DashboardOverviewService {
     }
 
     private ChannelOverview toChannelOverview(SensorChannel channel, ChannelStatus status,
-                                               LatestReadingProjection latest) {
+                                               LatestReadingProjection latest,
+                                               Long activeEpisodeId) {
         Double value = latest != null ? latest.getValue() : null;
         return new ChannelOverview(
                 channel.getId(), channel.getCode(), channel.getUnit(), channel.getQuantityKind(),
@@ -149,30 +182,34 @@ public class DashboardOverviewService {
                 value != null && thresholdDetector.isAnomaly(channel, value),
                 status != null && status.isInAlarm(),
                 status != null ? status.getLastAlertAt() : null,
-                channel.getThresholdValue(), channel.getThresholdDirection());
+                channel.getThresholdValue(), channel.getThresholdDirection(),
+                activeEpisodeId);
+    }
+
+    private static Specification<AlarmEpisode> activeEpisodeSpecification(
+            List<Long> deviceIds, List<Long> zoneIds) {
+        return (root, query, builder) -> {
+            var open = builder.equal(root.get("status"), AlarmEpisodeStatus.OPEN);
+            var deviceScope = root.get("device").get("id").in(deviceIds);
+            if (zoneIds.isEmpty()) {
+                return builder.and(open, deviceScope);
+            }
+            return builder.and(open, builder.or(
+                    deviceScope, root.get("zone").get("id").in(zoneIds)));
+        };
     }
 
     static Freshness freshness(Integer expectedIntervalSeconds, Instant lastSeenAt, Instant now,
                                OperatingDecision operatingDecision) {
-        if (expectedIntervalSeconds == null || expectedIntervalSeconds <= 0) {
-            return Freshness.NOT_MONITORED;
-        }
-        long staleAfterSeconds = Math.multiplyExact(expectedIntervalSeconds.longValue(), FRESHNESS_GRACE_MULTIPLIER);
-        if (lastSeenAt != null) {
-            long elapsedSeconds = Math.max(0L, Duration.between(lastSeenAt, now).getSeconds());
-            if (elapsedSeconds <= staleAfterSeconds) return Freshness.ONLINE;
-        }
-        if (!operatingDecision.scheduledActive()) {
-            return Freshness.PLANNED_OFFLINE;
-        }
-        if (operatingDecision.monitoringSuppressed(lastSeenAt)) {
-            return Freshness.RESUMING;
-        }
-        if (lastSeenAt == null) {
-            return Freshness.NEVER_SEEN;
-        }
-        long elapsedSeconds = Math.max(0L, Duration.between(lastSeenAt, now).getSeconds());
-        return elapsedSeconds > staleAfterSeconds ? Freshness.STALE : Freshness.ONLINE;
+        return switch (FreshnessPolicy.evaluate(
+                expectedIntervalSeconds, lastSeenAt, now, operatingDecision)) {
+            case NOT_MONITORED -> Freshness.NOT_MONITORED;
+            case PLANNED_OFFLINE -> Freshness.PLANNED_OFFLINE;
+            case RESUME_GRACE -> Freshness.RESUMING;
+            case NEVER_SEEN -> Freshness.NEVER_SEEN;
+            case ONLINE -> Freshness.ONLINE;
+            case STALE -> Freshness.STALE;
+        };
     }
 
     private record GroupKey(Long id, String name) {

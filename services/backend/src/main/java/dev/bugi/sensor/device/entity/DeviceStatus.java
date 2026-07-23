@@ -33,6 +33,10 @@ public class DeviceStatus {
 
     private Instant lastSeenAt;
 
+    public DeviceStatus(Device device) {
+        this(device, null);
+    }
+
     public DeviceStatus(Device device, Instant lastSeenAt) {
         this.device = device;
         this.lastSeenAt = lastSeenAt;

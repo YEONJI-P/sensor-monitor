@@ -28,7 +28,7 @@ public class SensorDataController {
         HttpStatus status = switch (result.outcome()) {
             case SAVED -> HttpStatus.OK;
             case DEVICE_NOT_FOUND -> HttpStatus.NOT_FOUND;
-            case NO_KNOWN_CHANNELS -> HttpStatus.UNPROCESSABLE_ENTITY;
+            case NO_KNOWN_CHANNELS, FUTURE_OBSERVED_AT -> HttpStatus.UNPROCESSABLE_ENTITY;
         };
         return ResponseEntity.status(status).body(result.response());
     }

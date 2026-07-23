@@ -1,13 +1,18 @@
 package dev.bugi.sensor.alert.scheduler;
 
-import dev.bugi.sensor.alert.dto.EnrichTarget;
-import dev.bugi.sensor.alert.repository.AlertRepository;
+import dev.bugi.sensor.alert.dto.EnrichmentClaim;
+import dev.bugi.sensor.alert.entity.AlarmType;
+import dev.bugi.sensor.alert.repository.AlertEnrichmentRepository;
+import dev.bugi.sensor.alert.service.AlarmEpisodeEnrichmentService;
+import dev.bugi.sensor.device.entity.SensorChannel;
 import dev.bugi.sensor.explain.client.ExplainClient;
 import dev.bugi.sensor.explain.config.ExplainProperties;
 import dev.bugi.sensor.explain.dto.AnomalyExplainRequest;
 import dev.bugi.sensor.explain.dto.AnomalyExplainResponse;
-import dev.bugi.sensor.device.entity.SensorChannel;
+import dev.bugi.sensor.explain.dto.FreshnessDiagnoseRequest;
+import dev.bugi.sensor.explain.dto.FreshnessDiagnoseResponse;
 import dev.bugi.sensor.sensordata.entity.SensorReading;
+import dev.bugi.sensor.sensordata.failure.FailedReadingRepository;
 import dev.bugi.sensor.sensordata.repository.SensorReadingRepository;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
@@ -15,86 +20,100 @@ import org.springframework.data.domain.PageRequest;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Component;
 
+import java.time.Clock;
 import java.util.ArrayList;
 import java.util.List;
 
 /**
- * evidence가 비어 있는 임계 Alert를 주기적으로 explain 서비스로 보강한다.
- * 수신 hot path 밖(스케줄 트리거)에서만 explain을 호출한다.
- *
- * 외부 HTTP(explain) 호출은 트랜잭션 밖에서 수행한다. 트랜잭션을 열어둔 채로
- * 최대 20회 순차 HTTP 호출을 하면 DB 커넥션을 장기 점유하기 때문이다.
- * 읽기는 프로젝션(EnrichTarget)으로 즉시 값만 확보하고, 쓰기는 alert별로
- * findById/save 각각의 짧은 트랜잭션에서 처리한다.
+ * episode snapshot을 claim한 뒤 transaction 밖에서 explain HTTP를 호출한다.
  */
 @Slf4j
 @Component
 @RequiredArgsConstructor
 public class AlertEnrichmentScheduler {
 
-    // 설명용 윈도우 크기(최근 판독 건수). 탐지가 아니라 근거·권고를 만드는 데만 쓴다.
+    private static final int CLAIM_BATCH = 20;
     private static final int WINDOW = 20;
-    // 지표를 신뢰할 최소 표본. 이보다 적으면(신규 채널 등) 지표 없이 단건 근거로 보강한다.
     private static final int MIN_SAMPLES = 5;
 
-    private final AlertRepository alertRepository;
+    private final AlertEnrichmentRepository enrichmentRepository;
+    private final AlarmEpisodeEnrichmentService alarmEpisodeEnrichmentService;
     private final SensorReadingRepository sensorReadingRepository;
+    private final FailedReadingRepository failedReadingRepository;
     private final ExplainClient explainClient;
     private final ExplainProperties explainProperties;
+    private final Clock clock;
 
-    @Scheduled(fixedRateString = "30000")
+    @Scheduled(fixedDelayString = "${explain.enrichment.fixed-delay-ms:30000}")
     public void enrichAlerts() {
         if (!explainProperties.isEnabled()) {
             return;
         }
 
-        List<EnrichTarget> targets = alertRepository.findEnrichTargets(PageRequest.of(0, 20));
-        for (EnrichTarget target : targets) {
-            // 임계값 alert엔 항상 sensorValue가 있으나, 없으면 double 언박싱 NPE를 피해 건너뛴다.
-            if (target.sensorValue() == null) {
-                continue;
-            }
-
-            // 설명용 윈도우: 채널의 최근 판독을 읽어 규칙으로 추세·이탈률·변동성을 계산(탐지엔 안 씀).
-            List<Double> recentValues = recentValues(target.channelId());
-            WindowMetrics metrics = WindowMetrics.of(
-                    recentValues, target.thresholdValue(), target.thresholdDirection());
-
-            AnomalyExplainRequest request = new AnomalyExplainRequest(
-                    target.deviceName(),
-                    target.quantityKind(),
-                    target.unit(),
-                    target.sensorValue(),
-                    target.thresholdValue(),
-                    target.thresholdDirection(),
-                    target.message(),
-                    recentValues.isEmpty() ? null : recentValues,
-                    metrics.breachRate(),
-                    metrics.trend(),
-                    metrics.volatility()
-            );
-
-            AnomalyExplainResponse response;
+        // claim()은 여기서 끝나는 짧은 transaction이다. 아래 HTTP 호출 동안 DB lease만 남는다.
+        List<EnrichmentClaim> claims =
+                enrichmentRepository.claim(CLAIM_BATCH, clock.instant());
+        for (EnrichmentClaim claim : claims) {
             try {
-                // 트랜잭션 밖에서 외부 HTTP 호출.
-                response = explainClient.explainAnomaly(request);
-            } catch (Exception e) {
-                // explain이 다운돼도 스케줄러가 죽지 않도록 개별 alert 실패는 무시하고 계속 진행한다.
-                log.warn("explain 알림 보강 실패 (alertId={}): {}", target.alertId(), e.getMessage());
-                continue;
+                Diagnosis diagnosis = switch (claim.alarmType()) {
+                    case THRESHOLD -> enrichThreshold(claim);
+                    case DEVICE_SILENCE -> enrichFreshness(claim);
+                    case ZONE_SILENCE -> throw new IllegalStateException(
+                            "ZONE_SILENCE는 explain 대상이 아닙니다");
+                };
+                if (!alarmEpisodeEnrichmentService.complete(
+                        claim, diagnosis.evidence(), diagnosis.recommendation(), clock.instant())) {
+                    log.info("만료된 explain lease 결과 폐기 (alertId={})", claim.alertId());
+                }
+            } catch (Exception ex) {
+                enrichmentRepository.fail(claim, clock.instant(), ex.getMessage());
+                log.warn("explain 보강 실패 (alertId={}, attempt={}): {}",
+                        claim.alertId(), claim.attempt(), ex.getMessage());
             }
-
-            // 결과 반영: 짧은 자체 트랜잭션(findById/save)에서 처리.
-            alertRepository.findById(target.alertId()).ifPresent(alert -> {
-                alert.enrich(response.evidence(), response.recommendation());
-                alertRepository.save(alert);
-            });
         }
     }
 
-    /** 채널의 최근 판독값을 시간순(과거→현재)으로 반환. 추세 계산이 쉬우라고 뒤집는다. */
+    private Diagnosis enrichThreshold(EnrichmentClaim claim) {
+        if (claim.sensorValue() == null || claim.channelId() == null) {
+            throw new IllegalStateException("threshold explain projection 값이 부족합니다");
+        }
+        List<Double> recentValues = recentValues(claim.channelId());
+        WindowMetrics metrics = WindowMetrics.of(
+                recentValues, claim.thresholdValue(), claim.thresholdDirection());
+        AnomalyExplainResponse response = explainClient.explainAnomaly(
+                new AnomalyExplainRequest(
+                        claim.deviceName(),
+                        claim.sensorType(),
+                        claim.unit(),
+                        claim.sensorValue(),
+                        claim.thresholdValue(),
+                        claim.thresholdDirection(),
+                        claim.message(),
+                        recentValues.isEmpty() ? null : recentValues,
+                        metrics.breachRate(),
+                        metrics.trend(),
+                        metrics.volatility()));
+        return new Diagnosis(response.evidence(), response.recommendation());
+    }
+
+    private Diagnosis enrichFreshness(EnrichmentClaim claim) {
+        if (claim.lastSeenAt() == null || claim.expectedIntervalSeconds() == null) {
+            throw new IllegalStateException("freshness episode snapshot 값이 부족합니다");
+        }
+        int failedRecent = failedReadingRepository.countByDeviceIdAndCreatedAtAfter(
+                claim.deviceId(), claim.lastSeenAt());
+        FreshnessDiagnoseResponse response = explainClient.diagnoseFreshness(
+                new FreshnessDiagnoseRequest(
+                        claim.deviceName(),
+                        claim.expectedIntervalSeconds(),
+                        claim.lastSeenAt().toString(),
+                        claim.elapsedSeconds(),
+                        failedRecent));
+        return new Diagnosis(response.report(), response.cause());
+    }
+
+    /** 채널의 최근 판독값을 시간순(과거→현재)으로 반환한다. */
     private List<Double> recentValues(Long channelId) {
-        // channelId 는 findEnrichTargets 가 'a.channel is not null' 로 걸러 항상 non-null 이라 방어 체크를 두지 않는다.
         List<SensorReading> recent = sensorReadingRepository
                 .findByChannelIdOrderByObservedAtDesc(channelId, PageRequest.of(0, WINDOW));
         List<Double> values = new ArrayList<>(recent.size());
@@ -104,11 +123,10 @@ public class AlertEnrichmentScheduler {
         return values;
     }
 
-    /**
-     * 윈도우에서 규칙으로 뽑는 파생 지표. 산발 스파이크 / 점진 열화 / 급성 이상을 가르는 신호다.
-     * 표본이 {@link #MIN_SAMPLES} 미만이면 신뢰할 수 없어 모두 null(설명은 단건 근거로 fallback).
-     */
-    private record WindowMetrics(Double breachRate, Double trend, Double volatility) {
+    private record Diagnosis(String evidence, String recommendation) {
+    }
+
+    static record WindowMetrics(Double breachRate, Double trend, Double volatility) {
 
         private static final WindowMetrics EMPTY = new WindowMetrics(null, null, null);
 
@@ -118,8 +136,6 @@ public class AlertEnrichmentScheduler {
                 return EMPTY;
             }
             int n = values.size();
-
-            // 이탈률: 채널 방향에 맞게 임계를 벗어난 판독 비율(threshold 없으면 계산 불가).
             Double breachRate = null;
             if (threshold != null) {
                 SensorChannel.ThresholdDirection effectiveDirection = direction == null
@@ -132,22 +148,19 @@ public class AlertEnrichmentScheduler {
                 breachRate = (double) breaches / n;
             }
 
-            // 추세: 후반 절반 평균 - 전반 절반 평균(양수면 상승 중).
             int half = n / 2;
             double front = average(values.subList(0, half));
             double back = average(values.subList(n - half, n));
             double trend = back - front;
-
-            // 변동성: 모표준편차.
             double mean = average(values);
-            double var = values.stream().mapToDouble(v -> (v - mean) * (v - mean)).sum() / n;
-            double volatility = Math.sqrt(var);
-
-            return new WindowMetrics(breachRate, trend, volatility);
+            double variance = values.stream()
+                    .mapToDouble(value -> (value - mean) * (value - mean))
+                    .sum() / n;
+            return new WindowMetrics(breachRate, trend, Math.sqrt(variance));
         }
 
-        private static double average(List<Double> xs) {
-            return xs.stream().mapToDouble(Double::doubleValue).average().orElse(0.0);
+        private static double average(List<Double> values) {
+            return values.stream().mapToDouble(Double::doubleValue).average().orElse(0.0);
         }
     }
 }

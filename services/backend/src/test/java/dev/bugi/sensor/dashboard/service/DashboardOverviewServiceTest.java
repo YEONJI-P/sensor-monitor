@@ -2,6 +2,8 @@ package dev.bugi.sensor.dashboard.service;
 
 import dev.bugi.sensor.dashboard.dto.DashboardOverviewResponse;
 import dev.bugi.sensor.dashboard.dto.DashboardOverviewResponse.Freshness;
+import dev.bugi.sensor.alert.repository.AlarmEpisodeRepository;
+import dev.bugi.sensor.alert.entity.AlarmEpisode;
 import dev.bugi.sensor.device.entity.ChannelStatus;
 import dev.bugi.sensor.device.entity.Device;
 import dev.bugi.sensor.device.entity.DeviceStatus;
@@ -47,6 +49,8 @@ class DashboardOverviewServiceTest {
     @Mock DeviceStatusRepository deviceStatusRepository;
     @Mock SensorChannelRepository sensorChannelRepository;
     @Mock ChannelStatusRepository channelStatusRepository;
+    @Mock AlarmEpisodeRepository alarmEpisodeRepository;
+    @Mock AlarmEpisode activeEpisode;
     @Mock SensorReadingRepository sensorReadingRepository;
     @Spy ThresholdDetector thresholdDetector = new ThresholdDetector();
     @Mock OperatingCalendarService operatingCalendarService;
@@ -115,6 +119,12 @@ class DashboardOverviewServiceTest {
         when(latest.getObservedAt()).thenReturn(NOW.minusSeconds(2));
         when(latest.getReceivedAt()).thenReturn(NOW.minusSeconds(1));
         when(sensorReadingRepository.findLatestByChannelIds(List.of(11L))).thenReturn(List.of(latest));
+        when(activeEpisode.getId()).thenReturn(99L);
+        when(activeEpisode.getDevice()).thenReturn(device);
+        when(activeEpisode.getChannel()).thenReturn(channel);
+        when(alarmEpisodeRepository.findAll(
+                any(org.springframework.data.jpa.domain.Specification.class)))
+                .thenReturn(List.of(activeEpisode));
 
         DashboardOverviewResponse result = service.getOverview("EMP001");
 
@@ -128,12 +138,14 @@ class DashboardOverviewServiceTest {
                     assertThat(deviceResult.freshness()).isEqualTo(Freshness.STALE);
                     assertThat(deviceResult.lastSeenAt()).isEqualTo(NOW.minusSeconds(61));
                     assertThat(deviceResult.currentAlarmCount()).isEqualTo(1);
+                    assertThat(deviceResult.activeEpisodeCount()).isEqualTo(1);
                     assertThat(deviceResult.channels()).singleElement().satisfies(channelResult -> {
                         assertThat(channelResult.latestValue()).isEqualTo(81.5);
                         assertThat(channelResult.anomaly()).isTrue();
                         assertThat(channelResult.inAlarm()).isTrue();
                         assertThat(channelResult.thresholdValue()).isEqualTo(80.0);
                         assertThat(channelResult.thresholdDirection()).isEqualTo(ThresholdDirection.ABOVE);
+                        assertThat(channelResult.activeEpisodeId()).isEqualTo(99L);
                     });
                 });
             });

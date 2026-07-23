@@ -14,6 +14,11 @@ public record BatchSsePayload(
         Instant receivedAt,
         List<Reading> readings
 ) {
-    public record Reading(Long channelId, String channelCode, Double value, boolean anomaly) {
+    public record Reading(Long channelId, String channelCode, Double value,
+                          boolean anomaly, boolean stateApplied) {
+        /** 기존 생성 코드 호환: 이전에는 저장된 모든 reading이 상태 판정에 적용됐다. */
+        public Reading(Long channelId, String channelCode, Double value, boolean anomaly) {
+            this(channelId, channelCode, value, anomaly, true);
+        }
     }
 }

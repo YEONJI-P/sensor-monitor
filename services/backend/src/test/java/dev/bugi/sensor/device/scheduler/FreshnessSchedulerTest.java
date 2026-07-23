@@ -1,22 +1,17 @@
 package dev.bugi.sensor.device.scheduler;
 
-import dev.bugi.sensor.alert.entity.Alert;
-import dev.bugi.sensor.alert.entity.AlertSeverity;
-import dev.bugi.sensor.alert.repository.AlertRepository;
-import dev.bugi.sensor.explain.client.ExplainClient;
-import dev.bugi.sensor.explain.config.ExplainProperties;
-import dev.bugi.sensor.explain.dto.FreshnessDiagnoseRequest;
-import dev.bugi.sensor.explain.dto.FreshnessDiagnoseResponse;
+import dev.bugi.sensor.alert.service.AlarmLifecycleService;
 import dev.bugi.sensor.device.entity.Device;
 import dev.bugi.sensor.device.entity.DeviceStatus;
+import dev.bugi.sensor.device.freshness.FreshnessDeviceState;
+import dev.bugi.sensor.device.freshness.FreshnessPolicy;
 import dev.bugi.sensor.device.repository.DeviceStatusRepository;
-import dev.bugi.sensor.factory.entity.Zone;
-import dev.bugi.sensor.factory.entity.Factory;
 import dev.bugi.sensor.factory.calendar.service.OperatingCalendarService;
 import dev.bugi.sensor.factory.calendar.service.OperatingCalendarService.OperatingDecision;
-import dev.bugi.sensor.sensordata.failure.FailedReadingRepository;
-import org.junit.jupiter.api.Test;
+import dev.bugi.sensor.factory.entity.Factory;
+import dev.bugi.sensor.factory.entity.Zone;
 import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.ArgumentCaptor;
 import org.mockito.InjectMocks;
@@ -28,307 +23,112 @@ import java.time.Clock;
 import java.time.Instant;
 import java.time.ZoneOffset;
 import java.util.List;
+import java.util.Map;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anySet;
 import static org.mockito.ArgumentMatchers.eq;
-import static org.mockito.Mockito.*;
+import static org.mockito.Mockito.lenient;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.verifyNoInteractions;
+import static org.mockito.Mockito.when;
 
 @ExtendWith(MockitoExtension.class)
 class FreshnessSchedulerTest {
 
-    @Mock DeviceStatusRepository deviceStatusRepository;
-    @Mock FailedReadingRepository failedReadingRepository;
-    @Mock AlertRepository alertRepository;
-    @Mock ExplainClient explainClient;
-    @Mock ExplainProperties explainProperties;
-    @Mock OperatingCalendarService operatingCalendarService;
-    private static final Instant NOW = Instant.parse("2026-07-16T00:00:00Z");
-    @Spy Clock clock = Clock.fixed(NOW, ZoneOffset.UTC);
+    private static final Instant NOW = Instant.parse("2026-07-23T00:00:00Z");
+    private static final OperatingDecision ACTIVE =
+            new OperatingDecision(true, false, null, "SCHEDULED_ACTIVE");
 
+    @Mock DeviceStatusRepository deviceStatusRepository;
+    @Mock OperatingCalendarService operatingCalendarService;
+    @Mock AlarmLifecycleService alarmLifecycleService;
+    @Spy Clock clock = Clock.fixed(NOW, ZoneOffset.UTC);
     @InjectMocks FreshnessScheduler scheduler;
 
     @BeforeEach
-    void operatingCalendarDefaultsToActive() {
+    void defaults() {
         lenient().when(operatingCalendarService.evaluate(anySet(), eq(NOW)))
-                .thenReturn(java.util.Map.of(1L, new OperatingDecision(true, false, null, "SCHEDULED_ACTIVE")));
+                .thenReturn(Map.of(1L, ACTIVE));
         lenient().when(operatingCalendarService.evaluateAlwaysOpenFallback())
-                .thenReturn(new OperatingDecision(true, false, null, "LEGACY_ALWAYS_OPEN"));
+                .thenReturn(ACTIVE);
     }
 
-    private DeviceStatus device(long id, long zoneId, long silentSeconds) {
-        return device(id, zoneId, silentSeconds, 1L);
+    @Test
+    void expectedInterval_두배를_scheduler와_dashboard가_공유한다() {
+        assertThat(FreshnessPolicy.evaluate(30, NOW.minusSeconds(60), NOW, ACTIVE))
+                .isEqualTo(FreshnessPolicy.State.ONLINE);
+        assertThat(FreshnessPolicy.evaluate(30, NOW.minusSeconds(61), NOW, ACTIVE))
+                .isEqualTo(FreshnessPolicy.State.STALE);
     }
 
-    private DeviceStatus device(long id, long zoneId, long silentSeconds, long factoryId) {
-        Zone zone = mock(Zone.class);
+    @Test
+    void zone별_판정과_episode_snapshot을_lifecycle에_넘긴다() {
+        DeviceStatus first = status(1L, 10L, NOW.minusSeconds(61), 30);
+        DeviceStatus second = status(2L, 10L, NOW.minusSeconds(120), 30);
+        when(deviceStatusRepository.findAllWithDeviceAndZone())
+                .thenReturn(List.of(first, second));
+
+        scheduler.checkFreshness();
+
+        @SuppressWarnings("unchecked")
+        ArgumentCaptor<List<FreshnessDeviceState>> states =
+                ArgumentCaptor.forClass(List.class);
+        ArgumentCaptor<Map<String, Object>> snapshot = ArgumentCaptor.forClass(Map.class);
+        verify(alarmLifecycleService).reconcileFreshnessZone(eq(10L), states.capture(),
+                snapshot.capture());
+        assertThat(states.getValue()).extracting(FreshnessDeviceState::state)
+                .containsOnly(FreshnessPolicy.State.STALE);
+        assertThat(snapshot.getValue()).containsEntry("zoneId", 10L)
+                .containsEntry("staleDeviceIds", List.of(1L, 2L));
+    }
+
+    @Test
+    void never_seen과_운영캘린더_억제도_episode를_열지_않도록_상태로_전달한다() {
+        DeviceStatus neverSeen = status(1L, 10L, null, 30);
+        DeviceStatus plannedOffline = status(2L, 10L, NOW.minusSeconds(120), 30);
+        when(deviceStatusRepository.findAllWithDeviceAndZone())
+                .thenReturn(List.of(neverSeen, plannedOffline));
+        when(operatingCalendarService.evaluate(anySet(), eq(NOW))).thenReturn(Map.of(
+                1L, new OperatingDecision(false, false, null, "PLANNED_OFFLINE")));
+
+        scheduler.checkFreshness();
+
+        @SuppressWarnings("unchecked")
+        ArgumentCaptor<List<FreshnessDeviceState>> states =
+                ArgumentCaptor.forClass(List.class);
+        verify(alarmLifecycleService).reconcileFreshnessZone(eq(10L), states.capture(), any());
+        assertThat(states.getValue()).extracting(FreshnessDeviceState::state)
+                .containsOnly(FreshnessPolicy.State.PLANNED_OFFLINE);
+    }
+
+    @Test
+    void status가_없으면_lifecycle을_호출하지_않는다() {
+        when(deviceStatusRepository.findAllWithDeviceAndZone()).thenReturn(List.of());
+        scheduler.checkFreshness();
+        verifyNoInteractions(alarmLifecycleService);
+    }
+
+    private DeviceStatus status(long deviceId, long zoneId, Instant lastSeenAt,
+                                int expectedIntervalSeconds) {
         Factory factory = mock(Factory.class);
-        lenient().when(factory.getId()).thenReturn(factoryId);
-        when(zone.getFactory()).thenReturn(factory);
-        when(zone.getId()).thenReturn(zoneId);
-        // 이름·id 는 알림(코호트/개별)을 만드는 경로에서만 읽히므로 정상 시나리오에선 미사용.
+        lenient().when(factory.getId()).thenReturn(1L);
+        Zone zone = mock(Zone.class);
+        lenient().when(zone.getId()).thenReturn(zoneId);
         lenient().when(zone.getName()).thenReturn("Z" + zoneId);
+        lenient().when(zone.getFactory()).thenReturn(factory);
         Device device = mock(Device.class);
-        lenient().when(device.getId()).thenReturn(id);
-        lenient().when(device.getName()).thenReturn("dev" + id);
-        when(device.getZone()).thenReturn(zone);
-        lenient().when(device.getExpectedIntervalSeconds()).thenReturn(10);
+        lenient().when(device.getId()).thenReturn(deviceId);
+        lenient().when(device.getCode()).thenReturn("D" + deviceId);
+        lenient().when(device.getName()).thenReturn("device-" + deviceId);
+        lenient().when(device.getExpectedIntervalSeconds()).thenReturn(expectedIntervalSeconds);
+        lenient().when(device.getZone()).thenReturn(zone);
         DeviceStatus status = mock(DeviceStatus.class);
-        when(status.getDevice()).thenReturn(device);
-        when(status.getLastSeenAt()).thenReturn(NOW.minusSeconds(silentSeconds));
+        lenient().when(status.getDeviceId()).thenReturn(deviceId);
+        lenient().when(status.getDevice()).thenReturn(device);
+        lenient().when(status.getLastSeenAt()).thenReturn(lastSeenAt);
         return status;
-    }
-
-    private DeviceStatus silent(long id, long zoneId) { return device(id, zoneId, 120); }
-    private DeviceStatus healthy(long id, long zoneId) { return device(id, zoneId, 2); }
-
-    @Test
-    void 혼자_침묵하면_explain진단이_담긴_CRITICAL() {
-        DeviceStatus d1 = silent(1, 100);
-        when(deviceStatusRepository.findMonitoredWithDeviceAndZone()).thenReturn(List.of(d1));
-        when(explainProperties.isEnabled()).thenReturn(true);
-        when(failedReadingRepository.countByDeviceIdAndCreatedAtAfter(eq(1L), any())).thenReturn(0);
-        when(explainClient.diagnoseFreshness(any(FreshnessDiagnoseRequest.class)))
-                .thenReturn(new FreshnessDiagnoseResponse("소스 침묵 의심", "수신 자체가 끊긴 것으로 보임", "echo"));
-
-        scheduler.checkFreshness();
-
-        ArgumentCaptor<Alert> captor = ArgumentCaptor.forClass(Alert.class);
-        verify(alertRepository).save(captor.capture());
-        Alert alert = captor.getValue();
-        assertThat(alert.getSeverity()).isEqualTo(AlertSeverity.CRITICAL);
-        assertThat(alert.getEvidence()).isEqualTo("수신 자체가 끊긴 것으로 보임");
-        assertThat(alert.getRecommendation()).isEqualTo("소스 침묵 의심");
-    }
-
-    @Test
-    void 이웃은_정상인데_혼자_침묵하면_개별_CRITICAL() {
-        // 같은 구역에 정상 수신 중인 이웃이 있으므로 게이트웨이·사이트는 정상 → 개별 고장.
-        DeviceStatus d1 = silent(1, 100), d2 = healthy(2, 100);
-        when(deviceStatusRepository.findMonitoredWithDeviceAndZone()).thenReturn(List.of(d1, d2));
-        when(explainProperties.isEnabled()).thenReturn(true);
-        when(explainClient.diagnoseFreshness(any())).thenReturn(new FreshnessDiagnoseResponse("c", "r", "echo"));
-
-        scheduler.checkFreshness();
-
-        ArgumentCaptor<Alert> captor = ArgumentCaptor.forClass(Alert.class);
-        verify(alertRepository).save(captor.capture());
-        assertThat(captor.getValue().getSeverity()).isEqualTo(AlertSeverity.CRITICAL);
-        verify(explainClient).diagnoseFreshness(any());
-    }
-
-    @Test
-    void 구역_전체가_동시_침묵하면_WARNING_집계_1건_explain호출없음() {
-        // 두 장치 모두 침묵 = 계획정지/게이트웨이 가능성 → 장치별 CRITICAL 대신 구역 1건.
-        DeviceStatus d1 = silent(1, 100), d2 = silent(2, 100);
-        when(deviceStatusRepository.findMonitoredWithDeviceAndZone()).thenReturn(List.of(d1, d2));
-
-        scheduler.checkFreshness();
-
-        ArgumentCaptor<Alert> captor = ArgumentCaptor.forClass(Alert.class);
-        verify(alertRepository, times(1)).save(captor.capture());
-        assertThat(captor.getValue().getSeverity()).isEqualTo(AlertSeverity.WARNING);
-        assertThat(captor.getValue().getMessage()).contains("구역 전체");
-        verify(explainClient, never()).diagnoseFreshness(any());
-    }
-
-    @Test
-    void 구역_전체_침묵은_틱마다_재알림하지_않는다() {
-        DeviceStatus d1 = silent(1, 100), d2 = silent(2, 100);
-        when(deviceStatusRepository.findMonitoredWithDeviceAndZone()).thenReturn(List.of(d1, d2));
-
-        scheduler.checkFreshness();
-        scheduler.checkFreshness();
-
-        verify(alertRepository, times(1)).save(any());
-    }
-
-    @Test
-    void 개별_침묵은_틱마다_재알림하지_않는다() {
-        DeviceStatus d1 = silent(1, 100);
-        when(deviceStatusRepository.findMonitoredWithDeviceAndZone()).thenReturn(List.of(d1));
-        when(explainProperties.isEnabled()).thenReturn(true);
-        when(explainClient.diagnoseFreshness(any())).thenReturn(new FreshnessDiagnoseResponse("c", "r", "echo"));
-
-        scheduler.checkFreshness();
-        scheduler.checkFreshness();
-
-        verify(alertRepository, times(1)).save(any());
-    }
-
-    @Test
-    void explain비활성이면_진단없이_알림만() {
-        DeviceStatus d1 = silent(1, 100);
-        when(deviceStatusRepository.findMonitoredWithDeviceAndZone()).thenReturn(List.of(d1));
-        when(explainProperties.isEnabled()).thenReturn(false);
-
-        scheduler.checkFreshness();
-
-        verify(explainClient, never()).diagnoseFreshness(any());
-        ArgumentCaptor<Alert> captor = ArgumentCaptor.forClass(Alert.class);
-        verify(alertRepository).save(captor.capture());
-        assertThat(captor.getValue().getEvidence()).isNull();
-        assertThat(captor.getValue().getSeverity()).isEqualTo(AlertSeverity.CRITICAL);
-    }
-
-    @Test
-    void 기대주기_이내면_알림없음() {
-        DeviceStatus d1 = healthy(1, 100);
-        when(deviceStatusRepository.findMonitoredWithDeviceAndZone()).thenReturn(List.of(d1));
-
-        scheduler.checkFreshness();
-
-        verifyNoInteractions(alertRepository, explainClient);
-    }
-
-    @Test
-    void 경과가_기대주기와_정확히_같으면_정상() {
-        // elapsed > expected 만 침묵. elapsed == expected(10s) 는 경계 안쪽 → 알림 없음.
-        DeviceStatus d1 = device(1, 100, 10);
-        when(deviceStatusRepository.findMonitoredWithDeviceAndZone()).thenReturn(List.of(d1));
-
-        scheduler.checkFreshness();
-
-        verifyNoInteractions(alertRepository, explainClient);
-    }
-
-    @Test
-    void 계획비가동과_재개유예중에는_alert와_explain을_호출하지_않는다() {
-        DeviceStatus status = silent(1, 100);
-        when(deviceStatusRepository.findMonitoredWithDeviceAndZone()).thenReturn(List.of(status));
-        OperatingDecision off = new OperatingDecision(false, false, null, "PLANNED_OFFLINE");
-        when(operatingCalendarService.evaluate(anySet(), eq(NOW))).thenReturn(java.util.Map.of(1L, off));
-
-        scheduler.checkFreshness();
-
-        verifyNoInteractions(alertRepository, explainClient);
-
-        OperatingDecision grace = new OperatingDecision(true, true, NOW.minusSeconds(30), "RESUME_GRACE");
-        when(operatingCalendarService.evaluate(anySet(), eq(NOW))).thenReturn(java.util.Map.of(1L, grace));
-        scheduler.checkFreshness();
-
-        verifyNoInteractions(alertRepository, explainClient);
-    }
-
-    @Test
-    void 한공장이_비운영이어도_다른공장은_계속_감시한다() {
-        DeviceStatus offFactory = device(1, 100, 120, 1L);
-        DeviceStatus activeFactory = device(2, 200, 120, 2L);
-        when(deviceStatusRepository.findMonitoredWithDeviceAndZone()).thenReturn(List.of(offFactory, activeFactory));
-        when(operatingCalendarService.evaluate(anySet(), eq(NOW))).thenReturn(java.util.Map.of(
-                1L, new OperatingDecision(false, false, null, "PLANNED_OFFLINE"),
-                2L, new OperatingDecision(true, false, NOW.minusSeconds(3600), "SCHEDULED_ACTIVE")));
-        when(explainProperties.isEnabled()).thenReturn(false);
-
-        scheduler.checkFreshness();
-
-        ArgumentCaptor<Alert> alert = ArgumentCaptor.forClass(Alert.class);
-        verify(alertRepository).save(alert.capture());
-        assertThat(alert.getValue().getDevice().getId()).isEqualTo(2L);
-    }
-
-    @Test
-    void 운영종료가_debounce를_해제해_다음운영구간을_새_episode로_만든다() {
-        DeviceStatus status = silent(1, 100);
-        when(deviceStatusRepository.findMonitoredWithDeviceAndZone()).thenReturn(List.of(status));
-        OperatingDecision active = new OperatingDecision(true, false, NOW.minusSeconds(3600), "SCHEDULED_ACTIVE");
-        OperatingDecision off = new OperatingDecision(false, false, null, "PLANNED_OFFLINE");
-        when(operatingCalendarService.evaluate(anySet(), eq(NOW)))
-                .thenReturn(java.util.Map.of(1L, active), java.util.Map.of(1L, off), java.util.Map.of(1L, active));
-        when(explainProperties.isEnabled()).thenReturn(false);
-
-        scheduler.checkFreshness();
-        scheduler.checkFreshness();
-        scheduler.checkFreshness();
-
-        verify(alertRepository, times(2)).save(any());
-    }
-
-    @Test
-    void 일부만_침묵하면_침묵한_장치들만_개별_CRITICAL() {
-        // 3대 중 2대 침묵(silent < seen) → 구역 집계가 아니라 침묵한 2대 각각 개별 처리.
-        DeviceStatus d1 = silent(1, 100), d2 = silent(2, 100), d3 = healthy(3, 100);
-        when(deviceStatusRepository.findMonitoredWithDeviceAndZone()).thenReturn(List.of(d1, d2, d3));
-        when(explainProperties.isEnabled()).thenReturn(true);
-        when(explainClient.diagnoseFreshness(any())).thenReturn(new FreshnessDiagnoseResponse("c", "r", "echo"));
-
-        scheduler.checkFreshness();
-
-        ArgumentCaptor<Alert> captor = ArgumentCaptor.forClass(Alert.class);
-        verify(alertRepository, times(2)).save(captor.capture());
-        assertThat(captor.getAllValues())
-                .allMatch(a -> a.getSeverity() == AlertSeverity.CRITICAL);
-        verify(explainClient, times(2)).diagnoseFreshness(any());
-    }
-
-    @Test
-    void explain호출이_실패해도_진단없이_알림은_저장된다() {
-        // diagnose()의 try-catch(의도적 방어) 경로: 예외가 나도 evidence=null 로 CRITICAL 저장.
-        DeviceStatus d1 = silent(1, 100);
-        when(deviceStatusRepository.findMonitoredWithDeviceAndZone()).thenReturn(List.of(d1));
-        when(explainProperties.isEnabled()).thenReturn(true);
-        when(explainClient.diagnoseFreshness(any())).thenThrow(new RuntimeException("explain 다운"));
-
-        scheduler.checkFreshness();
-
-        ArgumentCaptor<Alert> captor = ArgumentCaptor.forClass(Alert.class);
-        verify(alertRepository).save(captor.capture());
-        Alert alert = captor.getValue();
-        assertThat(alert.getSeverity()).isEqualTo(AlertSeverity.CRITICAL);
-        assertThat(alert.getEvidence()).isNull();
-        assertThat(alert.getRecommendation()).isNull();
-    }
-
-    // ── DeviceStatus 축소(inAlarm 제거) 이후 경계 확인 ───────────────────
-    // freshness Alert 는 device 만 알고 어떤 channel·batch 에서 났는지 모른다(수신 자체가 끊긴 사건).
-    // Alert.channel/batch 를 device_status 축소와 무관하게 항상 null 로 남기는지 회귀 고정한다.
-
-    @Test
-    void 개별_침묵_Alert는_channel과_batch가_null이다() {
-        DeviceStatus d1 = silent(1, 100);
-        when(deviceStatusRepository.findMonitoredWithDeviceAndZone()).thenReturn(List.of(d1));
-        when(explainProperties.isEnabled()).thenReturn(false);
-
-        scheduler.checkFreshness();
-
-        ArgumentCaptor<Alert> captor = ArgumentCaptor.forClass(Alert.class);
-        verify(alertRepository).save(captor.capture());
-        assertThat(captor.getValue().getChannel()).isNull();
-        assertThat(captor.getValue().getBatch()).isNull();
-        assertThat(captor.getValue().getDevice()).isNotNull();
-    }
-
-    @Test
-    void 구역_전체_침묵_Alert도_channel과_batch가_null이다() {
-        DeviceStatus d1 = silent(1, 100), d2 = silent(2, 100);
-        when(deviceStatusRepository.findMonitoredWithDeviceAndZone()).thenReturn(List.of(d1, d2));
-
-        scheduler.checkFreshness();
-
-        ArgumentCaptor<Alert> captor = ArgumentCaptor.forClass(Alert.class);
-        verify(alertRepository).save(captor.capture());
-        assertThat(captor.getValue().getChannel()).isNull();
-        assertThat(captor.getValue().getBatch()).isNull();
-        assertThat(captor.getValue().getDevice()).isNotNull();
-    }
-
-    @Test
-    void 수신시각_없는_상태행은_건너뛴다() {
-        // 한 번도 수신 없는 장치는 device_status 행 자체가 없어 조회(JOIN)에서 빠진다.
-        // 그래도 lastSeenAt 이 비어 있는 행은 방어적으로 건너뛴다.
-        Factory factory = mock(Factory.class);
-        when(factory.getId()).thenReturn(1L);
-        Zone zone = mock(Zone.class);
-        when(zone.getFactory()).thenReturn(factory);
-        Device device = mock(Device.class);
-        when(device.getZone()).thenReturn(zone);
-        DeviceStatus neverSeen = mock(DeviceStatus.class);
-        when(neverSeen.getDevice()).thenReturn(device);
-        when(neverSeen.getLastSeenAt()).thenReturn(null);
-        when(deviceStatusRepository.findMonitoredWithDeviceAndZone()).thenReturn(List.of(neverSeen));
-
-        scheduler.checkFreshness();
-
-        verifyNoInteractions(alertRepository, explainClient);
     }
 }

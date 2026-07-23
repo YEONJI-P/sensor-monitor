@@ -24,7 +24,8 @@ public record DashboardOverviewResponse(
             Instant lastSeenAt,
             Freshness freshness,
             int currentAlarmCount,
-            List<ChannelOverview> channels
+            List<ChannelOverview> channels,
+            long activeEpisodeCount
     ) {
     }
 
@@ -40,7 +41,8 @@ public record DashboardOverviewResponse(
             boolean inAlarm,
             Instant lastAlertAt,
             Double thresholdValue,
-            SensorChannel.ThresholdDirection thresholdDirection
+            SensorChannel.ThresholdDirection thresholdDirection,
+            Long activeEpisodeId
     ) {
     }
 

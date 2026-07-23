@@ -1,6 +1,9 @@
 package dev.bugi.sensor.alert.dto;
 
 import dev.bugi.sensor.alert.entity.Alert;
+import dev.bugi.sensor.alert.entity.AlarmScopeType;
+import dev.bugi.sensor.alert.entity.AlarmType;
+import dev.bugi.sensor.alert.entity.AlertNotificationReason;
 import dev.bugi.sensor.alert.entity.AlertSeverity;
 import lombok.AllArgsConstructor;
 import lombok.Getter;
@@ -24,6 +27,11 @@ public class AlertResponse {
     private String evidence;
     private String recommendation;
     private Instant createdAt;
+    // 기존 alert projection을 깨지 않는 additive lifecycle metadata.
+    private AlarmType type;
+    private AlarmScopeType scope;
+    private Long episodeId;
+    private AlertNotificationReason notificationReason;
 
     public static AlertResponse from(Alert alert) {
         return new AlertResponse(
@@ -37,7 +45,11 @@ public class AlertResponse {
                 alert.getSeverity(),
                 alert.getEvidence(),
                 alert.getRecommendation(),
-                alert.getCreatedAt()
+                alert.getCreatedAt(),
+                alert.getAlarmType(),
+                alert.getScopeType(),
+                alert.getEpisode() != null ? alert.getEpisode().getId() : null,
+                alert.getNotificationReason()
         );
     }
 }

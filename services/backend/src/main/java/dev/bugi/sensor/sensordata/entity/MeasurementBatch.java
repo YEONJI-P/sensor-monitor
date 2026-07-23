@@ -19,7 +19,8 @@ import java.time.Instant;
 @NoArgsConstructor
 @Table(
         name = "measurement_batch",
-        indexes = @Index(name = "idx_measurement_batch_device_observed", columnList = "device_id, observed_at")
+        indexes = @Index(name = "idx_measurement_batch_device_observed", columnList = "device_id, observed_at"),
+        uniqueConstraints = @UniqueConstraint(name = "uk_measurement_batch_receipt", columnNames = "receipt_id")
 )
 public class MeasurementBatch {
 
@@ -40,11 +41,28 @@ public class MeasurementBatch {
     // 원본 순서 보존용(예: C-MAPSS cycle, CNC 행 번호). 재전송·중복 감지는 아직 구현하지 않았다.
     private Long sourceSeq;
 
+    // producer eventId의 범위/요청 hash는 receipt가 소유하고 batch는 surrogate FK만 참조한다.
+    @OneToOne(fetch = FetchType.LAZY)
+    @JoinColumn(name = "receipt_id")
+    private IngestReceipt receipt;
+
     @Builder
-    public MeasurementBatch(Device device, Instant observedAt, Instant receivedAt, Long sourceSeq) {
+    public MeasurementBatch(Device device, Instant observedAt, Instant receivedAt, Long sourceSeq,
+                            IngestReceipt receipt) {
         this.device = device;
         this.observedAt = observedAt;
         this.receivedAt = receivedAt;
         this.sourceSeq = sourceSeq;
+        if (receipt != null) {
+            attachReceipt(receipt);
+        }
+    }
+
+    public void attachReceipt(IngestReceipt receipt) {
+        if (this.receipt != null && this.receipt != receipt) {
+            throw new IllegalStateException("measurement batch에는 receipt를 한 번만 연결할 수 있습니다");
+        }
+        this.receipt = receipt;
+        receipt.attachBatch(this);
     }
 }

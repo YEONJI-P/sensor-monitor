@@ -2,7 +2,8 @@ package dev.bugi.sensor.sensordata.dto;
 
 import jakarta.validation.constraints.NotBlank;
 import jakarta.validation.constraints.NotEmpty;
-import lombok.AllArgsConstructor;
+import jakarta.validation.constraints.Pattern;
+import jakarta.validation.constraints.Size;
 import lombok.Getter;
 import lombok.NoArgsConstructor;
 
@@ -15,7 +16,6 @@ import java.util.Map;
  */
 @Getter
 @NoArgsConstructor
-@AllArgsConstructor
 public class BatchIngestRequest {
 
     @NotBlank
@@ -29,4 +29,24 @@ public class BatchIngestRequest {
 
     @NotEmpty
     private Map<String, Double> measurements;
+
+    // producer 재시도 멱등성 키. deviceCode 범위에서만 유일하며 생략 가능하다.
+    @Size(max = 128)
+    @Pattern(regexp = ".*\\S.*", message = "eventId는 공백일 수 없습니다")
+    private String eventId;
+
+    /** 기존 4필드 호출자 호환 생성자. */
+    public BatchIngestRequest(String deviceCode, Instant observedAt, Long sourceSeq,
+                              Map<String, Double> measurements) {
+        this(deviceCode, observedAt, sourceSeq, measurements, null);
+    }
+
+    public BatchIngestRequest(String deviceCode, Instant observedAt, Long sourceSeq,
+                              Map<String, Double> measurements, String eventId) {
+        this.deviceCode = deviceCode;
+        this.observedAt = observedAt;
+        this.sourceSeq = sourceSeq;
+        this.measurements = measurements;
+        this.eventId = eventId;
+    }
 }

@@ -11,7 +11,7 @@ import java.util.concurrent.CopyOnWriteArrayList;
 
 /**
  * 대시보드 실시간 전송(SSE) 관리.
- * 구독 시점의 접근 가능 device 집합을 emitter에 바인딩하고, 이벤트의 deviceId가
+ * 구독 시점의 접근 가능 device/zone 집합을 emitter에 바인딩하고, 이벤트 scope가
  * 그 집합에 있을 때만 전송한다 — REST 조회와 동일한 접근 범위를 실시간 채널에도 적용.
  * 메시지 버스 없이 인프로세스 메서드 호출로만 동작한다.
  */
@@ -24,12 +24,18 @@ public class SseService {
     private final List<Subscriber> subscribers = new CopyOnWriteArrayList<>();
 
     /** 구독자와 그가 볼 수 있는 device 범위 */
-    private record Subscriber(SseEmitter emitter, Set<Long> deviceIds) {
+    private record Subscriber(
+            SseEmitter emitter, Set<Long> deviceIds, Set<Long> zoneIds) {
     }
 
     public SseEmitter subscribe(Set<Long> deviceIds) {
+        return subscribe(deviceIds, Set.of());
+    }
+
+    public SseEmitter subscribe(Set<Long> deviceIds, Set<Long> zoneIds) {
         SseEmitter emitter = new SseEmitter(TIMEOUT);
-        Subscriber subscriber = new Subscriber(emitter, deviceIds);
+        Subscriber subscriber = new Subscriber(
+                emitter, Set.copyOf(deviceIds), Set.copyOf(zoneIds));
         subscribers.add(subscriber);
         emitter.onCompletion(() -> subscribers.remove(subscriber));
         emitter.onTimeout(() -> subscribers.remove(subscriber));
@@ -40,8 +46,17 @@ public class SseService {
 
     /** deviceId 이벤트를 그 장치에 접근 가능한 구독자에게만 전송한다. */
     public void broadcast(String event, Long deviceId, Object data) {
+        broadcast(event, deviceId, null, data);
+    }
+
+    /** device 또는 zone scope 이벤트를 접근 가능한 구독자에게만 전송한다. */
+    public void broadcast(
+            String event, Long deviceId, Long zoneId, Object data) {
         for (Subscriber subscriber : subscribers) {
             if (deviceId != null && !subscriber.deviceIds().contains(deviceId)) {
+                continue;
+            }
+            if (zoneId != null && !subscriber.zoneIds().contains(zoneId)) {
                 continue;
             }
             send(subscriber, event, data);

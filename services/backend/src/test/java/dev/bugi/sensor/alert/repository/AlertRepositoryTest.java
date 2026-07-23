@@ -49,8 +49,12 @@ class AlertRepositoryTest extends AbstractPostgresTest {
                              String evidence, String recommendation, Instant createdAt) {
         em.createNativeQuery("""
                 INSERT INTO alert (device_id, channel_id, sensor_value, threshold_value, message,
-                                   severity, evidence, recommendation, created_at, updated_at)
-                VALUES (:deviceId, :channelId, 99.0, 80.0, :message, :severity, :evidence, :recommendation, :createdAt, :createdAt)
+                                   severity, evidence, recommendation, created_at, updated_at,
+                                   alarm_type, scope_type, notification_reason,
+                                   notification_status, notification_attempts)
+                VALUES (:deviceId, :channelId, 99.0, 80.0, :message, :severity, :evidence,
+                        :recommendation, :createdAt, :createdAt,
+                        'THRESHOLD', 'CHANNEL', 'LEGACY', 'NOT_REQUESTED', 0)
                 """)
                 .setParameter("deviceId", deviceId)
                 .setParameter("channelId", channelId)

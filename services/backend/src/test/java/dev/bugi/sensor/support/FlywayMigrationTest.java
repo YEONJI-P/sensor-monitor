@@ -21,7 +21,7 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 /**
  * 빈 PostgreSQL에 운영(prod) 설정을 그대로 적용한다.
  *
- * 컨텍스트가 뜨려면 Flyway V1~V6 적용 후 Hibernate ddl-auto=validate가 성공해야 한다.
+ * 컨텍스트가 뜨려면 Flyway V1~V8 적용 후 Hibernate ddl-auto=validate가 성공해야 한다.
  * 별도 SQL로 history, 핵심 스키마와 공개 데모 토폴로지를 확인해 테스트 설정이 우연히
  * create/update로 우회하지 않았는지도 막는다.
  */
@@ -52,7 +52,7 @@ class FlywayMigrationTest {
     Environment environment;
 
     @Test
-    void prod는_flyway_V1부터_V6를_적용하고_공개_데모_토폴로지와_운영캘린더를_준비한다() {
+    void prod는_flyway_V1부터_V9를_적용하고_alarm_lifecycle과_ingest_receipt를_준비한다() {
         assertThat(environment.getProperty("spring.flyway.enabled")).isEqualTo("true");
         assertThat(environment.getProperty("spring.jpa.hibernate.ddl-auto")).isEqualTo("validate");
 
@@ -61,7 +61,7 @@ class FlywayMigrationTest {
                 WHERE version IS NOT NULL AND success = true
                 ORDER BY installed_rank
                 """, String.class);
-        assertThat(appliedVersions).containsExactly("1", "2", "3", "4", "5", "6");
+        assertThat(appliedVersions).containsExactly("1", "2", "3", "4", "5", "6", "7", "8", "9");
 
         // 정규화 batch 스키마: 관측 시각(observed_at)은 batch 가 timestamptz 로 가진다.
         String observedAtType = jdbcTemplate.queryForObject("""
@@ -90,22 +90,42 @@ class FlywayMigrationTest {
         assertThat(tableExists("factory_weekly_interval")).isTrue();
         assertThat(tableExists("factory_date_override")).isTrue();
         assertThat(tableExists("factory_date_override_interval")).isTrue();
+        assertThat(tableExists("alarm_episode")).isTrue();
+        assertThat(tableExists("alarm_acknowledgement")).isTrue();
+        assertThat(tableExists("ingest_receipt")).isTrue();
         assertThat(indexExists("factory_weekly_interval", "idx_factory_weekly_interval_factory_day")).isTrue();
         assertThat(indexExists("factory_date_override", "uk_factory_date_override")).isTrue();
         // 채널 화면 알림 조회(channel_id 필터 + created_at 정렬)용 인덱스.
         assertThat(indexExists("alert", "idx_alert_channel_created")).isTrue();
+        assertThat(indexExists("alarm_episode", "uk_alarm_episode_open_threshold")).isTrue();
+        assertThat(indexExists("alarm_episode", "uk_alarm_episode_open_device_silence")).isTrue();
+        assertThat(indexExists("alarm_episode", "uk_alarm_episode_open_zone_silence")).isTrue();
+        assertThat(indexExists("ingest_receipt", "uk_ingest_receipt_device_event")).isTrue();
+        assertThat(indexExists("alert", "idx_alert_enrichment_claim")).isTrue();
 
         // device 는 설정만 남겼다: type/threshold_value 제거, code 추가.
         assertThat(columnExists("device", "type")).isFalse();
         assertThat(columnExists("device", "threshold_value")).isFalse();
         assertThat(columnExists("device", "code")).isTrue();
-        // 알람 상태는 채널 경계(channel_status)로 이동: device_status 에서 제거.
+        // threshold mirror는 channel_status, freshness heartbeat는 device_status 경계에 남는다.
         assertThat(columnExists("device_status", "in_alarm")).isFalse();
         assertThat(columnExists("device_status", "last_alert_at")).isFalse();
         assertThat(columnExists("device_status", "last_seen_at")).isTrue();
+        assertThat(columnExists("channel_status", "active_episode_id")).isTrue();
+        assertThat(columnExists("channel_status", "last_evaluated_observed_at")).isTrue();
+        assertThat(columnExists("channel_status", "last_evaluated_batch_id")).isTrue();
         // alert 앵커: channel_id·batch_id 추가.
         assertThat(columnExists("alert", "channel_id")).isTrue();
         assertThat(columnExists("alert", "batch_id")).isTrue();
+        assertThat(columnExists("alert", "episode_id")).isTrue();
+        assertThat(columnExists("alert", "alarm_type")).isTrue();
+        assertThat(columnExists("alert", "scope_type")).isTrue();
+        assertThat(columnExists("alert", "notification_reason")).isTrue();
+        assertThat(columnExists("alert", "enrichment_lease_token")).isTrue();
+        assertThat(columnExists("alert", "enrichment_claimed_at")).isTrue();
+        assertThat(columnExists("alert", "enrichment_next_attempt_at")).isTrue();
+        assertThat(columnExists("alert", "enrichment_completed_at")).isTrue();
+        assertThat(columnExists("measurement_batch", "receipt_id")).isTrue();
         // failed_reading: 문자열 식별자 추가.
         assertThat(columnExists("failed_reading", "device_code")).isTrue();
         assertThat(columnExists("failed_reading", "channel_code")).isTrue();
@@ -114,6 +134,8 @@ class FlywayMigrationTest {
         assertThat(rowCount("zones")).isEqualTo(3);
         assertThat(rowCount("device")).isEqualTo(3);
         assertThat(rowCount("sensor_channel")).isEqualTo(20);
+        assertThat(rowCount("device_status")).isEqualTo(3);
+        assertThat(rowCount("channel_status")).isEqualTo(20);
         assertThat(rowCount("users")).isZero();
         assertThat(rowCount("zone_users")).isZero();
         assertThat(rowCount("factory_operating_calendar")).isEqualTo(2);
@@ -139,6 +161,11 @@ class FlywayMigrationTest {
                 .isEqualTo("timestamp with time zone");
         assertThat(columnType("factory_date_override", "local_date")).isEqualTo("date");
         assertThat(columnType("factory_weekly_interval", "start_minute")).isEqualTo("smallint");
+        assertThat(columnType("alarm_episode", "opened_at")).isEqualTo("timestamp with time zone");
+        assertThat(columnType("alarm_episode", "snapshot")).isEqualTo("jsonb");
+        assertThat(columnType("ingest_receipt", "response_json")).isEqualTo("jsonb");
+        assertThat(columnType("alert", "enrichment_claimed_at"))
+                .isEqualTo("timestamp with time zone");
 
         assertThatThrownBy(() -> jdbcTemplate.update("""
                 UPDATE factory_operating_calendar SET resume_grace_seconds = 86401
@@ -152,6 +179,98 @@ class FlywayMigrationTest {
                 INSERT INTO factory_date_override (factory_id, local_date, kind)
                 VALUES ((SELECT min(id) FROM factories), DATE '2026-07-20', 'HOLIDAY')
                 """)).hasMessageContaining("ck_factory_date_override_kind");
+
+        assertThatThrownBy(() -> jdbcTemplate.update("""
+                INSERT INTO alarm_episode (
+                    alarm_type, scope_type, status, current_severity, max_severity,
+                    device_id, channel_id, opened_at, snapshot, created_at, updated_at
+                ) VALUES (
+                    'THRESHOLD', 'DEVICE', 'OPEN', 'WARNING', 'WARNING',
+                    (SELECT min(id) FROM device), NULL, CURRENT_TIMESTAMP, '{}'::jsonb,
+                    CURRENT_TIMESTAMP, CURRENT_TIMESTAMP
+                )
+                """)).hasMessageContaining("ck_alarm_episode_scope");
+
+        assertThatThrownBy(() -> jdbcTemplate.update("""
+                INSERT INTO alarm_episode (
+                    alarm_type, scope_type, status, current_severity, max_severity,
+                    device_id, channel_id, opened_at, snapshot, created_at, updated_at
+                ) VALUES (
+                    'THRESHOLD', 'CHANNEL', 'OPEN', 'WARNING', 'WARNING',
+                    (SELECT d.id FROM device d
+                     WHERE d.id <> (SELECT c.device_id FROM sensor_channel c ORDER BY c.id LIMIT 1)
+                     ORDER BY d.id LIMIT 1),
+                    (SELECT c.id FROM sensor_channel c ORDER BY c.id LIMIT 1),
+                    CURRENT_TIMESTAMP, '{}'::jsonb, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP
+                )
+                """)).hasMessageContaining("fk_alarm_episode_threshold_owner");
+
+        assertThatThrownBy(() -> jdbcTemplate.update("""
+                INSERT INTO alert (
+                    alarm_type, scope_type, notification_reason,
+                    message, severity, created_at, updated_at
+                ) VALUES (
+                    'THRESHOLD', 'DEVICE', 'LEGACY',
+                    'invalid pair', 'WARNING', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP
+                )
+                """)).hasMessageContaining("ck_alert_alarm_scope_pair");
+
+        // V7을 모르는 직전 backend가 lifecycle metadata를 생략해도 rollback 중 INSERT는 유지된다.
+        jdbcTemplate.update("""
+                INSERT INTO alert (
+                    device_id, message, severity, created_at, updated_at
+                ) VALUES (
+                    (SELECT min(id) FROM device),
+                    '데이터 수신 끊김 - legacy rollback',
+                    'WARNING', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP
+                )
+                """);
+        assertThat(jdbcTemplate.queryForObject("""
+                SELECT count(*) FROM alert
+                WHERE message = '데이터 수신 끊김 - legacy rollback'
+                  AND alarm_type = 'DEVICE_SILENCE'
+                  AND scope_type = 'DEVICE'
+                  AND notification_reason = 'LEGACY'
+                """, Integer.class)).isOne();
+
+        jdbcTemplate.update("""
+                INSERT INTO alarm_episode (
+                    alarm_type, scope_type, status, current_severity, max_severity,
+                    device_id, channel_id, opened_at, snapshot, created_at, updated_at
+                ) VALUES (
+                    'THRESHOLD', 'CHANNEL', 'OPEN', 'WARNING', 'WARNING',
+                    (SELECT c.device_id FROM sensor_channel c ORDER BY c.id LIMIT 1),
+                    (SELECT c.id FROM sensor_channel c ORDER BY c.id LIMIT 1),
+                    CURRENT_TIMESTAMP, '{}'::jsonb, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP
+                )
+                """);
+        assertThatThrownBy(() -> jdbcTemplate.update("""
+                INSERT INTO alarm_episode (
+                    alarm_type, scope_type, status, current_severity, max_severity,
+                    device_id, channel_id, opened_at, snapshot, created_at, updated_at
+                ) VALUES (
+                    'THRESHOLD', 'CHANNEL', 'OPEN', 'CRITICAL', 'CRITICAL',
+                    (SELECT c.device_id FROM sensor_channel c ORDER BY c.id LIMIT 1),
+                    (SELECT c.id FROM sensor_channel c ORDER BY c.id LIMIT 1),
+                    CURRENT_TIMESTAMP, '{}'::jsonb, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP
+                )
+                """)).hasMessageContaining("uk_alarm_episode_open_threshold");
+
+        jdbcTemplate.update("""
+                INSERT INTO ingest_receipt (
+                    device_code, event_id, request_hash, created_at
+                ) VALUES ('CMAPSS-U1', 'evt-1', 'hash-1', CURRENT_TIMESTAMP)
+                """);
+        jdbcTemplate.update("""
+                INSERT INTO ingest_receipt (
+                    device_code, event_id, request_hash, created_at
+                ) VALUES ('CMAPSS-U2', 'evt-1', 'hash-2', CURRENT_TIMESTAMP)
+                """);
+        assertThatThrownBy(() -> jdbcTemplate.update("""
+                INSERT INTO ingest_receipt (
+                    device_code, event_id, request_hash, created_at
+                ) VALUES ('CMAPSS-U1', 'evt-1', 'hash-3', CURRENT_TIMESTAMP)
+                """)).hasMessageContaining("uk_ingest_receipt_device_event");
 
         assertThat(jdbcTemplate.queryForObject("""
                 SELECT count(*) FROM zones z
