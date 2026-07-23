@@ -83,9 +83,9 @@ graph LR
 
 ## 4. 시스템 아키텍처
 
-센서 데이터 수신은 별도 메시지 버스 없이 동기 처리합니다. 수신 요청이 들어오면 한 트랜잭션 안에서 센서 데이터를 저장하고, 장치의 마지막 수신 시각을 갱신하고, 채널별 임계 방향(`ABOVE`/`BELOW`/`ABS_ABOVE`)의 이탈을 판정해 알림을 생성합니다. 저장과 알림 이벤트는 트랜잭션 커밋 후 SSE로 대시보드에 실시간 전달됩니다.
+센서 데이터 수신은 별도 메시지 버스 없이 동기 처리합니다. 수신 요청이 들어오면 한 트랜잭션 안에서 센서 데이터를 저장하고, 장치의 마지막 수신 시각을 갱신하고, 채널별 임계 방향(`ABOVE`/`BELOW`/`ABS_ABOVE`)의 이탈을 판정합니다. 현재 이상 상태는 `alarm_episode`, 사용자에게 보여 준 개별 발화 이력은 `alert`에 분리해 저장합니다. 저장과 이벤트는 트랜잭션 커밋 후 SSE로 대시보드에 전달됩니다.
 
-주기 스케줄러 두 개가 수신 경로 밖에서 동작합니다. 하나는 기대 수신 주기를 넘긴 침묵 장치를 감지하고, 다른 하나는 생성된 알림의 근거와 권고를 채우기 위해 별도 Python 분석 서비스(explain)를 HTTP로 호출합니다. 이상 탐지는 규칙 기반이고, 설명과 진단만 LLM이 담당합니다.
+주기 스케줄러 두 개가 수신 경로 밖에서 동작합니다. 하나는 기대 수신 주기의 2배를 넘긴 침묵 장치를 감지하고, 다른 하나는 생성된 알림의 당시 snapshot을 바탕으로 근거와 권고를 채우기 위해 별도 Python 분석 서비스(explain)를 HTTP로 호출합니다. explain 작업은 DB에서 claim한 뒤 HTTP를 트랜잭션 밖에서 수행하며 lease와 backoff로 재시도합니다. 이상 탐지는 규칙 기반이고, 설명과 진단만 LLM이 담당합니다.
 
 ```mermaid
 graph TD
@@ -218,8 +218,11 @@ erDiagram
 
     channel_status {
         bigint channel_id PK "sensor_channel과 공유 PK(@MapsId)"
-        boolean in_alarm "알람 상태(엣지 트리거)"
-        timestamptz last_alert_at "NULLABLE"
+        boolean in_alarm "현재 threshold 탐지 상태"
+        timestamptz last_alert_at "마지막 실제 알림, NULLABLE"
+        timestamptz last_evaluated_observed_at "상태 적용 watermark"
+        bigint last_evaluated_batch_id FK "동일 관측시각 tie-breaker"
+        bigint active_episode_id FK "NULLABLE"
     }
 
     measurement_batch {
@@ -228,6 +231,16 @@ erDiagram
         timestamptz observed_at "원본 관측 시각, NULLABLE(없으면 received_at)"
         timestamptz received_at "서버 Clock 주입"
         bigint source_seq "NULLABLE, cycle 번호·행 인덱스"
+        bigint receipt_id FK "NULLABLE, ingest 멱등성"
+    }
+
+    ingest_receipt {
+        bigint id PK
+        varchar device_code "UK(device_code,event_id)"
+        varchar event_id
+        varchar request_hash
+        varchar outcome "NULLABLE, 처리 완료 결과"
+        jsonb response_json "NULLABLE, replay 응답"
     }
 
     sensor_reading {
@@ -239,9 +252,13 @@ erDiagram
 
     alerts {
         bigint id PK
-        bigint device_id FK "NULLABLE - freshness alert는 device만"
-        bigint channel_id FK "NULLABLE - 임계 alert만 세팅"
-        bigint batch_id FK "NULLABLE - 임계 alert만 세팅"
+        bigint episode_id FK "NULLABLE - legacy alert"
+        varchar alarm_type "THRESHOLD/DEVICE_SILENCE/ZONE_SILENCE"
+        varchar scope_type "CHANNEL/DEVICE/ZONE"
+        varchar notification_reason "INITIAL/REMINDER/SEVERITY_ESCALATION/LEGACY"
+        bigint device_id FK "NULLABLE"
+        bigint channel_id FK "NULLABLE - threshold만"
+        bigint batch_id FK "NULLABLE - threshold만"
         double sensor_value
         double threshold_value
         varchar message
@@ -250,6 +267,31 @@ erDiagram
         varchar recommendation "NULLABLE, LLM 보강"
         timestamptz created_at
         timestamptz updated_at
+    }
+
+    alarm_episode {
+        bigint id PK
+        varchar alarm_type "THRESHOLD/DEVICE_SILENCE/ZONE_SILENCE"
+        varchar scope_type "CHANNEL/DEVICE/ZONE"
+        varchar status "OPEN/RESOLVED"
+        varchar current_severity "INFO/WARNING/CRITICAL"
+        varchar max_severity "INFO/WARNING/CRITICAL"
+        bigint device_id FK "NULLABLE"
+        bigint channel_id FK "NULLABLE"
+        bigint zone_id FK "NULLABLE"
+        timestamptz opened_at
+        timestamptz resolved_at "NULLABLE"
+        varchar resolution_reason "NULLABLE"
+        timestamptz last_notified_at "NULLABLE"
+        jsonb snapshot "발생 당시 판정 설정"
+    }
+
+    alarm_acknowledgement {
+        bigint id PK
+        bigint episode_id FK
+        bigint user_id FK
+        varchar ack_severity
+        timestamptz created_at
     }
 
     failed_readings {
@@ -275,11 +317,17 @@ erDiagram
     device ||--o{ sensor_channel : "측정 채널"
     sensor_channel ||--|| channel_status : "알람 상태(1:1)"
     device ||--o{ measurement_batch : "관측 batch"
+    ingest_receipt ||--o| measurement_batch : "멱등 수신 결과"
     measurement_batch ||--o{ sensor_reading : "batch 내 판독"
     sensor_channel ||--o{ sensor_reading : "채널별 판독"
-    sensor_channel ||--o{ alerts : "임계 초과"
+    sensor_channel ||--o{ alarm_episode : "threshold 상태"
+    device ||--o{ alarm_episode : "장치 침묵"
+    zones ||--o{ alarm_episode : "구역 침묵"
+    alarm_episode ||--o{ alarm_acknowledgement : "확인 이력"
+    users ||--o{ alarm_acknowledgement : "확인 주체"
+    alarm_episode ||--o{ alerts : "발화 이력"
     measurement_batch ||--o{ alerts : "발생 근거"
-    device ||--o{ alerts : "freshness"
+    device ||--o{ alerts : "알림 대상"
 ```
 
 ---
@@ -333,9 +381,11 @@ Swagger UI: `http://localhost:23100/swagger-ui/index.html` (컨테이너 데모�
 
 | Method | Endpoint | 설명 | 인증 |
 |---|---|---|---|
-| POST | `/sensor-data` | 배치 수신 (게이트웨이·시뮬레이터 → 서버). body: `deviceCode`, `observedAt?`, `sourceSeq?`, `measurements`(채널 code→value map) | `X-Ingest-Key` |
+| POST | `/sensor-data` | 배치 수신 (게이트웨이·시뮬레이터 → 서버). body: `deviceCode`, `eventId?`, `observedAt?`, `sourceSeq?`, `measurements`(채널 code→value map) | `X-Ingest-Key` |
 
-> 한 물리 노드(`deviceCode`)의 한 관측 시점(batch) 값 묶음을 한 요청으로 받습니다. 미지 채널·null 값은 예외 없이 부분 실패로 처리해 응답 `rejected`에 채널 코드와 사유(`UNKNOWN_CHANNEL`/`NULL_VALUE`)를 담고, 나머지 채널은 정상 저장합니다. 응답은 `batchId`·`deviceId`·`deviceCode`·`observedAt`·`receivedAt`·`savedCount`·`rejected`를 반환하며, 장치 없음은 404(batch 미생성), 요청 채널 전부가 미지·무효면 422(batch 미생성)입니다. 이전의 scalar 조회 API(`GET /sensor-data`, `GET /sensor-data/{deviceId}`)는 이 모델 전환과 함께 제거됐고, 조회는 아래 Channel API로 옮겼습니다.
+> 한 물리 노드(`deviceCode`)의 한 관측 시점(batch) 값 묶음을 한 요청으로 받습니다. 미지 채널·null 값은 예외 없이 부분 실패로 처리해 응답 `rejected`에 채널 코드와 사유(`UNKNOWN_CHANNEL`/`NULL_VALUE`)를 담고, 나머지 채널은 정상 저장합니다. 응답은 기존 필드와 함께 상태에 실제 적용된 판독 수를 반환합니다. 장치 없음은 404(batch 미생성), 요청 채널 전부가 미지·무효하거나 `observedAt`이 서버 수신 시각보다 5분 넘게 미래이면 422(batch·heartbeat 미생성)입니다. 늦게 도착한 과거 판독은 이력과 차트에는 저장하지만 현재 episode와 카드 상태를 되돌리지 않습니다.
+
+> `eventId`는 선택적인 producer 멱등성 키이며 `(deviceCode,eventId)` 범위에서만 유일합니다. 같은 payload의 재시도는 저장된 HTTP 결과를 그대로 반환하고 SSE를 다시 보내지 않으며, 같은 키를 다른 payload에 재사용하면 409를 반환합니다. `sourceSeq`는 순서 힌트일 뿐 unique key가 아닙니다.
 
 > 수신 경로는 사람용 JWT와 분리한 공유 키를 사용합니다. backend와 simulator에 같은 `INGEST_API_KEY`를 설정하면 simulator가 `X-Ingest-Key` 헤더로 전송합니다. 키가 없으면 두 서비스 모두 시작 단계에서 실패하고, 헤더가 없거나 다르면 `401`과 `UNAUTHORIZED` 응답을 반환합니다.
 
@@ -356,8 +406,11 @@ Swagger UI: `http://localhost:23100/swagger-ui/index.html` (컨테이너 데모�
 | GET | `/alerts/channel/{channelId}` | 채널별 알림 조회 | JWT |
 | GET | `/alerts/recent?channelId=&limit=` | 채널별 최근 알림 (대시보드) | JWT |
 | GET | `/alerts/daily-count?channelId=&days=` | 채널별 일자별 알림 수 (대시보드) | JWT |
+| GET | `/alarm-episodes` | 접근 범위의 episode 조회 (`status`, `type`, `scopeType`, `deviceId`, `channelId`, `zoneId` 선택 필터 + 페이지네이션) | JWT |
+| GET | `/alarm-episodes/{id}` | episode 상태·발생/해제 시각·snapshot·최근 확인 조회 | JWT |
+| POST | `/alarm-episodes/{id}/ack` | 열린 episode 확인 처리 (`SYSTEM_ADMIN`, 범위 내 `FACTORY_ADMIN`·`MEMBER`; 동일 통지에 멱등) | JWT |
 
-> 임계 alert는 `deviceId`·`channelId` 둘 다 채워지고, freshness(수신 끊김) alert는 채널이 없어 `deviceId`만 채워집니다(`channelId=null`).
+> `alarm_episode`는 현재 사건의 시작·유지·해제를 나타내는 정본이고, `alert`는 `INITIAL`·`REMINDER`·`SEVERITY_ESCALATION`처럼 실제로 발화한 notification 이력입니다. 기존 `/alerts` 필드는 유지하며 `type`·`scope`·`episodeId`·`notificationReason`을 additive하게 반환합니다. episode의 현재 상태와 해제 사유는 `/alarm-episodes`에서 조회합니다. `/alerts/daily-count`는 episode 수가 아니라 실제 notification 수입니다.
 
 ### 실시간 스트림 (SSE)
 
@@ -366,7 +419,7 @@ Swagger UI: `http://localhost:23100/swagger-ui/index.html` (컨테이너 데모�
 | GET | `/dashboard/stream?token=` | 접근 범위 내 센서, 알림 이벤트 실시간 스트림 | 쿼리 토큰 |
 | GET | `/dashboard/overview` | 접근 가능한 공장·구역·장치와 채널 최신 상태를 한 번에 조회 | JWT |
 
-> EventSource가 헤더를 못 실어 Access Token을 쿼리로 받습니다. 구독자는 자신의 접근 가능 장치로 이벤트가 필터링됩니다. `SYSTEM_ADMIN`은 전체, `FACTORY_ADMIN`은 소속 공장, `MEMBER`·`VIEWER`는 배정 구역의 telemetry를 조회합니다. `sensor-data` 이벤트는 batch 단위로 채널 판독 배열(`readings`)을 한 번에 담아 보내며, 각 판독의 `anomaly`는 서버 `ThresholdDetector`가 계산한 순간 임계 판정입니다(알람의 쿨다운·해제 상태와는 별개). 연결이 닫히면 refresh token으로 access token을 갱신해 재구독하고, 30초마다 overview를 다시 조회해 유실 이벤트를 보정합니다.
+> EventSource가 헤더를 못 실어 Access Token을 쿼리로 받습니다. 구독자는 자신의 접근 가능 장치로 이벤트가 필터링됩니다. `SYSTEM_ADMIN`은 전체, `FACTORY_ADMIN`은 소속 공장, `MEMBER`·`VIEWER`는 배정 구역의 telemetry를 조회합니다. `sensor-data` 이벤트는 batch 단위 판독과 `stateApplied`를, `alert` 이벤트는 실제 notification을, `alarm-episode` 이벤트는 `OPEN`·`RESOLVED`·`ACK`·`ENRICHED` 상태 변경을 전달합니다. 모두 DB 트랜잭션 커밋 후 전송하므로 rollback된 유령 이벤트는 없습니다. 연결이 닫히면 refresh token으로 access token을 갱신해 재구독하고, 30초 polling으로 인프로세스 SSE 유실을 보정합니다.
 
 > overview의 freshness는 `NOT_MONITORED`(기대 주기 미설정), `PLANNED_OFFLINE`(운영시간 밖), `RESUMING`(운영 재개 후 첫 수신 유예), `NEVER_SEEN`, `ONLINE`, `STALE` 여섯 단계입니다. 최근 데이터가 실제로 들어오면 비운영시간이나 유예 중에도 `ONLINE`이며, 그 밖에는 마지막 수신 후 기대 주기의 2배까지 `ONLINE`, 이후 `STALE`입니다. 요약 분모와 freshness 경고 lamp는 미감시·계획 비가동·재개 대기 장치를 제외합니다.
 
@@ -416,22 +469,25 @@ Spring이 스케줄러에서 HTTP로 호출하는 별도 서비스입니다. 탐
 
 ### 센서 데이터 수신과 알림
 
-- `POST /sensor-data` 수신 시 한 트랜잭션에서 센서 데이터 저장, 장치 수신 시각 갱신, 임계값 초과 판정, 알림 생성
-- 알림은 **엣지 트리거**로 생성 — 정상에서 임계값을 이탈하는 순간 한 건만 만들고, 이탈이 지속되는 동안은 억제합니다. 임계값의 0.1% 히스테리시스 밴드 안쪽으로 복귀하면 알람을 해제하고, 해제 뒤 5분 쿨다운으로 임계 부근의 반복 발화를 줄입니다
-- severity는 이탈 폭으로 판정(임계값 대비 여유가 크면 `CRITICAL`). 마지막 수신 시각은 `device_status`, 채널별 알람 여부·마지막 알림 시각은 `channel_status`에서 설정과 분리해 관리
+- `POST /sensor-data` 수신 시 한 트랜잭션에서 batch/readings 저장, 장치 heartbeat 갱신, 임계값 판정, episode 전이와 필요한 notification 생성을 수행
+- **트리거:** 현재 episode가 없는 채널의 최신 판독이 `ABOVE`·`BELOW`·`ABS_ABOVE` 임계값을 이탈하면 즉시 `THRESHOLD/CHANNEL` episode를 `OPEN`합니다. 임계 대비 이탈 폭이 10%를 넘으면 `CRITICAL`, 아니면 `WARNING`입니다
+- **유지:** 이탈이 계속되거나 0.1% strict hysteresis band 안에 있으면 같은 episode를 유지합니다. notification cooldown은 마지막 실제 발화 사이 5분이며 탐지 상태와 `inAlarm`은 억제하지 않습니다. 5분이 지난 뒤에도 이탈이 지속되면 다음 최신 판독에서 `REMINDER`, `WARNING → CRITICAL` 상승이면 즉시 `SEVERITY_ESCALATION`을 만들고, 현재 severity의 최신 notification을 확인한 episode는 같은 severity reminder를 억제합니다
+- **해제:** 방향별 release 경계를 완전히 통과한 최신 판독에서 `RECOVERED`로 종료합니다. threshold 값·방향을 변경하거나 제거하면 `CONFIG_CHANGED`로 종료하며, 이름·단위 같은 표시 설정만 바뀌면 발생 당시 snapshot은 그대로 유지합니다. 해제 자체는 `alert` 행을 추가하지 않고 episode와 `alarm-episode` SSE만 갱신합니다
+- **순서:** 판독 이력은 늦게 와도 저장하지만 채널 watermark보다 과거인 관측은 live state에 적용하지 않습니다. `observedAt`이 서버 수신 시각보다 5분 넘게 미래인 요청은 전체를 422로 거부합니다
+- `eventId`를 보내면 `(deviceCode,eventId)` 멱등 재시도를 지원하고, 같은 결과를 재생할 때 batch·alert·SSE를 중복 생성하지 않습니다
+- 마지막 수신 시각은 `device_status`, 채널별 현재 알람 여부·마지막 실제 알림 시각·활성 episode는 `channel_status`에서 설정과 분리해 관리
 - 별도 메시지 버스 없이 동기 처리 (설계 근거는 아래 설계 메모 참고)
 - 이상 판정은 `AnomalyDetector` 전략 인터페이스로 분리(현재 `ThresholdDetector`), 판정 로직 교체 가능
 - 검증 실패, 미등록 장치 요청은 조용히 버리지 않고 `failed_readings`에 사유와 함께 적재
-- 알림은 severity(INFO/WARNING/CRITICAL)와 근거(evidence), 권고(recommendation) 필드를 가지며, 근거와 권고는 explain 서비스가 사후 보강
-- explain 보강은 현재 알림 채널의 최근 판독 20건을 사용하며, 방향별 임계 이탈률·추세·변동성을 설명 신호로 전달합니다. 이는 탐지 조건이나 발화 시점을 바꾸지 않습니다
+- 알림은 severity(INFO/WARNING/CRITICAL)와 근거(evidence), 권고(recommendation) 필드를 가지며, explain 보강은 발생 당시 episode snapshot과 최근 판독을 사용합니다. 채널 설정이 나중에 바뀌어도 과거 알림의 판정 근거는 바뀌지 않습니다
 
 ### 장치 freshness 감지
 
 - 장치 설정에 기대 수신 주기(`expectedIntervalSeconds`)를 두고, 마지막 수신 시각(`lastSeenAt`)은 런타임 상태라 `device_status`에 두어 수신마다 갱신
-- 대시보드 상태는 기대 주기의 2배까지 `ONLINE` 유예를 두고 이후 `STALE`로 표시해 정시 수신의 작은 지연이 화면을 깜빡이지 않게 함
-- 주기 스케줄러가 기대 주기를 넘겨 침묵한 장치를 감지 (데이터가 안 오는 상황을 신호로 포착)
-- 같은 구역 장치가 동시에 침묵하면 사이트 사건(계획 정지, 게이트웨이 장애)으로 보고 구역 한 건으로 집계(`WARNING`), 이웃이 정상 수신 중인데 단독 침묵하면 개별 고장으로 `CRITICAL` + explain 원인진단
-- 공장 운영 캘린더가 비운영 또는 재개 유예로 판정한 장치는 scheduler의 개별·구역 침묵 분모에서 제외. 운영 종료 시 JVM debounce를 해제해 다음 운영 구간을 새 침묵 episode로 판정
+- 대시보드와 scheduler가 같은 정책을 사용해 마지막 수신 뒤 기대 주기의 2배까지 `ONLINE`, 그 이후 `STALE`로 판정
+- **트리거:** 운영 중이며 한 번 이상 수신한 감시 대상 장치가 `STALE`이면 장치 episode를 엽니다. 같은 구역에서 eligible 장치가 2대 이상이고 모두 `STALE`이면 개별 episode 대신 `ZONE_SILENCE` 한 건을 `CRITICAL`로 엽니다. 아직 한 번도 수신하지 않은 `NEVER_SEEN`은 화면에만 표시하고 episode를 만들지 않습니다
+- **유지:** 같은 장치·구역의 침묵이 이어지면 영속 episode를 재사용합니다. zone 행과 장치 상태를 DB에서 직렬화하므로 scheduler 재시작이나 여러 인스턴스의 동시 tick에도 같은 episode와 초기 notification이 중복되지 않습니다. 5분 reminder, acknowledgement 억제, severity 상승 규칙은 threshold와 같습니다
+- **해제/재분류:** 수신 재개는 `RECOVERED`, 운영시간 밖은 `PLANNED_OFFLINE`, 재개 유예는 `RESUME_GRACE`, 감시 해제는 `MONITORING_DISABLED`로 종료합니다. 전체 침묵과 부분 침묵 사이가 바뀌면 기존 zone/장치 episode를 `RECLASSIFIED`로 닫고 새 scope episode를 엽니다
 - 날짜 예외가 주간표보다 우선하고 `OPEN`은 해당 날짜를 완전히 대체. 캘린더가 없는 공장은 기존처럼 24시간 감시하여 설정 누락이 장애를 숨기지 않음
 
 ### 공장 운영 캘린더
@@ -502,7 +558,7 @@ Spring이 스케줄러에서 HTTP로 호출하는 별도 서비스입니다. 탐
 - Java 17
 - 컨테이너 실행 시 Docker와 Docker Compose
 
-독립 풀 데모는 이 저장소의 `docker-compose.yml` 하나로 실행합니다(원커맨드는 `make demo`). 직접 개발 실행은 별도 Compose가 아닙니다. 홈서버/prod 배포는 이 저장소가 아니라 personal-hub `infra`가 담당합니다.
+독립 풀 데모는 이 저장소의 `docker-compose.yml` 하나로 실행합니다(원커맨드는 `make demo`). 직접 개발 실행은 별도 Compose가 아닙니다. 홈서버/prod 배포는 이 저장소가 아니라 bugi-server-infra가 담당합니다.
 
 | 경로 | 파일 | PostgreSQL | 용도 |
 |---|---|---|---|
@@ -559,7 +615,7 @@ docker compose --profile live up -d simulator-live
 
 ### 홈서버 / prod 배포
 
-홈서버 배포는 이 저장소가 아니라 **personal-hub `infra`** 가 소유합니다: compose·nginx 라우팅·이미지 SHA pin·ingest 공유 키·운영 관리자 bootstrap·배포 자동화(systemd timer)가 모두 그쪽에 있습니다. 이 저장소는 backend·explain·simulator 이미지와 Flyway 스키마·기준 토폴로지만 제공하고, prod 적용 계약(공개 origin·감시 URL·ingest 인증·이미지 배포 경계)은 personal-hub `CONTRACT.md`를 따릅니다. `/sensor-data`는 내부 network에서만 `X-Ingest-Key`로 호출하고 public reverse proxy는 계속 차단합니다.
+홈서버 배포는 이 저장소가 아니라 **bugi-server-infra**가 소유합니다: Compose·nginx 라우팅·이미지 SHA pin·ingest 공유 키·simulator 실행 인자·운영 관리자 bootstrap·배포 자동화(systemd timer)가 모두 그쪽에 있습니다. 이 저장소는 backend·explain·simulator 이미지와 Flyway 스키마·기준 토폴로지만 제공하고, prod 적용 계약(공개 origin·감시 URL·ingest 인증·이미지 배포 경계)은 bugi-server-infra `CONTRACT.md`를 따릅니다. `/sensor-data`는 내부 network에서만 `X-Ingest-Key`로 호출하고 public reverse proxy는 계속 차단합니다.
 
 ### 테스트 실행
 
@@ -580,7 +636,7 @@ node services/backend/src/test/js/calendar-validation.test.js
 > 테스트는 세 갈래입니다.
 > - **컨텍스트 부팅 스모크**(`contextLoads`)는 인메모리 H2 로 동작해 별도 인프라 없이 실행됩니다(엔티티 매핑·설정 오류를 싸게 잡는 용도이며, DB 계층은 검증하지 않습니다). 설정은 `services/backend/src/test/resources/application.yml`.
 > - **DB 계층 검증**(리포지토리·네이티브 쿼리·제약·컬럼 타입)은 Testcontainers 로 프로덕션과 동일한 `postgres:15` 를 띄워 검증하므로 **로컬에 도커가 실행 중이어야 합니다**. 컨테이너는 한 번만 떠서 모든 리포지토리 테스트가 재사용합니다.
-> - **운영 스키마 검증**(`FlywayMigrationTest`)은 빈 `postgres:15`에 prod 프로파일을 적용해 Flyway V1~V6 실행, 공개 데모 토폴로지·채널 임계 계약·운영 캘린더 backfill과 Hibernate `ddl-auto=validate` 부팅을 함께 확인합니다.
+> - **운영 스키마 검증**(`FlywayMigrationTest`)은 빈 `postgres:15`에 prod 프로파일을 적용해 Flyway V1~V9 실행, 공개 데모 토폴로지·채널 임계 계약·운영 캘린더·alarm lifecycle backfill과 Hibernate `ddl-auto=validate` 부팅을 함께 확인합니다.
 
 ### Swagger UI
 
@@ -664,7 +720,7 @@ device는 `deviceCode`(`CMAPSS-U1`/`CMAPSS-U2`/`CNC-EXP01`)로 식별합니다. 
 
 - backend의 `prod` 프로파일은 Flyway migration을 먼저 실행하고 Hibernate는 `ddl-auto=validate`로 결과만 검증합니다. 첫 스키마는 `services/backend/src/main/resources/db/migration/V1__initial_schema.sql`입니다.
 - 독립 풀 데모 `docker-compose.yml`은 `SPRING_PROFILES_ACTIVE=local`을 명시하고 `ddl-auto=update` + `seed.sql` 경로를 유지합니다.
-- 홈서버/prod 배포(personal-hub `infra`)는 `prod` 프로파일로 기존 PostgreSQL 인스턴스의 별도 database에 Flyway migration을 적용합니다.
+- 홈서버/prod 배포(bugi-server-infra)는 `prod` 프로파일로 기존 PostgreSQL 인스턴스의 별도 database에 Flyway migration을 적용합니다.
 - 빈 운영 DB와 접속 role은 배포 인프라가 먼저 만들어야 합니다. Flyway는 DB/role 생성이나 백업 도구가 아니며, 이미 만들어진 DB 안에서 schema와 명시적으로 버전 관리하는 기준 데이터만 적용합니다.
 - V1은 schema만 만들고 checksum 고정을 위해 이후 수정하지 않습니다.
 - V2(`V2__normalized_ingest_model.sql`)는 수신 모델을 "채널=Device"에서 물리 Device ─ SensorChannel ─ MeasurementBatch ─ SensorReading 정규화 모델로 전환하는 DDL입니다. `device.type`·`device.threshold_value` 제거와 `device.code`(UK) 추가, `sensor_channel`·`measurement_batch`·`sensor_reading`·`channel_status` 신설, `alert`에 `channel_id`·`batch_id` 추가, scalar 텔레메트리 테이블 `sensor_data` 제거를 포함합니다.
@@ -672,10 +728,13 @@ device는 `deviceCode`(`CMAPSS-U1`/`CMAPSS-U2`/`CNC-EXP01`)로 식별합니다. 
 - V4(`V4__expand_representative_sensor_channels.sql`)는 방향 제약에 `ABS_ABOVE`를 추가하고 대표 채널을 총 20개로 확장합니다. C-MAPSS 임계값은 FD001 초기 건강 구간, CNC 임계값은 experiment01 절댓값 분포를 근거로 둔 초기값입니다.
 - V5(`V5__enforce_channel_threshold_pair.sql`)는 기존 부분 입력을 정규화하고 `threshold_value`·`threshold_direction`의 동시 NULL/동시 입력과 `ABS_ABOVE > 0`을 CHECK 제약으로 강제합니다.
 - V6(`V6__factory_operating_calendar.sql`)는 공장별 캘린더 header·주간 구간·날짜 예외·특근 구간을 추가합니다. 기존 공장은 안전 기본값인 24시간 감시로 backfill한 뒤 V3 데모 두 공장만 평일 08:00~18:00, `Asia/Seoul`, 재개 유예 300초로 시작합니다. 반복 일정은 분 정수와 `date`, 감사 시각은 `timestamptz`로 저장합니다.
-- V2~V6 모두 사용자, 구역 소속, 비밀번호를 만들지 않습니다. 따라서 공개 홈서버의 첫 계정과 최소 권한 bootstrap 절차는 배포 전에 별도로 확정해야 합니다.
-- 독립 풀 데모는 Flyway를 실행하지 않으므로 V2~V6가 적용되지 않습니다. device/채널·캘린더와 여러 역할 계정은 `services/simulator/seed.sql`을 수동 실행해 넣고, 같은 임계 계약은 애플리케이션 서비스가 검증합니다.
-- **seed.sql과 Flyway V3+V4+V6는 같은 최종 데모 토폴로지와 캘린더를 서로 다른 경로로 넣습니다.** 같은 DB에 둘 다 적용하지 않습니다. 로컬은 seed.sql만, prod는 Flyway(V1~V6)만 적용합니다.
-- 운영 DB에 한 번 적용된 migration은 내용을 수정하지 않고 다음 변경을 새 `Vn__...sql` 파일로 추가합니다. V1~V6는 적용 후 checksum 불변 대상입니다.
+- V7(`V7__alarm_episode_lifecycle.sql`)은 영속 `alarm_episode`·acknowledgement, scope별 OPEN unique index, status mirror와 기존 `alert`의 명시적 alarm/scope/notification metadata를 추가합니다. 기존 `in_alarm=true` 채널만 제한적으로 legacy OPEN episode로 승격하고 과거 recovery 시점은 추측하지 않습니다.
+- V8(`V8__ingest_idempotency.sql`)은 `(device_code,event_id)` receipt와 결과 replay를 추가합니다. `source_seq`의 기존 non-unique 의미는 바꾸지 않습니다.
+- V9(`V9__alert_enrichment_claim_lease.sql`)은 explain 작업의 claim token·lease·시도 횟수·다음 재시도 시각을 추가합니다. 외부 HTTP 장애는 탐지·episode·notification 저장을 롤백하지 않습니다.
+- V2~V9 모두 사용자, 구역 소속, 비밀번호를 만들지 않습니다. 따라서 공개 홈서버의 첫 계정과 최소 권한 bootstrap 절차는 배포 전에 별도로 확정해야 합니다.
+- 독립 풀 데모는 Flyway를 실행하지 않으므로 V2~V9가 적용되지 않습니다. device/채널·캘린더와 여러 역할 계정은 `services/simulator/seed.sql`을 수동 실행해 넣고, lifecycle 테이블은 Hibernate local 설정이 생성하며 같은 임계 계약은 애플리케이션 서비스가 검증합니다.
+- **seed.sql과 Flyway V3+V4+V6는 같은 최종 데모 토폴로지와 캘린더를 서로 다른 경로로 넣습니다.** 같은 DB에 둘 다 적용하지 않습니다. 로컬은 seed.sql과 Hibernate local schema, prod는 Flyway(V1~V9)를 사용합니다.
+- 운영 DB에 한 번 적용된 migration은 내용을 수정하지 않고 다음 변경을 새 `Vn__...sql` 파일로 추가합니다. V1~V9는 적용 후 checksum 불변 대상입니다.
 
 #### Hibernate가 이미 만든 DB의 1회 전환
 
@@ -690,7 +749,7 @@ Flyway history가 없는데 테이블이 들어 있는 DB는 prod 첫 기동이 
    SPRING_FLYWAY_BASELINE_VERSION=1
    ```
 
-   이 기동은 V1 SQL을 실행하지 않고 기존 스키마를 version 1로 기록한 뒤 V2~V6를 적용하고 Hibernate validation을 수행합니다. migration이나 validation이 실패하면 배포를 중단하고 스키마·기존 데이터 차이를 수정해야 합니다.
+   이 기동은 V1 SQL을 실행하지 않고 기존 스키마를 version 1로 기록한 뒤 V2~V9를 적용하고 Hibernate validation을 수행합니다. migration이나 validation이 실패하면 배포를 중단하고 스키마·기존 데이터 차이를 수정해야 합니다.
 4. 성공을 확인한 즉시 두 변수를 제거하고 평소 prod 설정으로 다시 기동합니다. 애플리케이션 기본 설정에는 `baseline-on-migrate`를 켜 두지 않습니다.
 
 > 위 baseline 절차를 스키마가 불완전하거나 출처를 모르는 DB에 쓰면 V1을 실행한 것처럼 기록해 버립니다. 새 홈서버 DB처럼 빈 DB에는 baseline 변수를 주지 않고 Flyway가 V1을 직접 적용하게 합니다.
@@ -707,8 +766,9 @@ ghcr.io/yeonji-p/sensor-monitor-simulator:<git-sha>
 
 - **`latest` 는 발행하지 않습니다.** 같은 태그가 다른 코드를 가리키면 무엇이 돌고 있는지 확인할 수도, 되돌릴 좌표를 잡을 수도 없습니다.
 - main push의 CI(`ci.yml`)가 모든 테스트를 통과하면 `.github/workflows/publish-images.yml`을 호출해 세 이미지를 같은 SHA로 자동 발행합니다. `workflow_dispatch`는 선택 서비스 재발행용으로 유지합니다.
-- 세 이미지 발행이 성공하면 CI는 personal-hub의 세 image pin과 배포 문서를 같은 SHA로 바꾸는 branch와 PR을 제안합니다. PR은 자동 병합되지 않으므로 새 환경변수·Flyway·rollback 호환성을 확인하고 사람이 병합해야 홈서버 배포 대상이 됩니다.
-- cross-repository PR에는 Sensor Monitor 저장소의 Actions secret `PERSONAL_HUB_PR_TOKEN`을 사용합니다. 값은 personal-hub 한 저장소만 선택한 fine-grained token이며 `Contents: Read and write`, `Pull requests: Read and write`만 부여합니다. 운영 환경변수와 홈서버 비밀값은 이 workflow에 전달하지 않습니다.
+- 세 이미지 발행이 성공하면 CI는 bugi-server-infra `docker-compose.yml`의 backend·explain·simulator image pin 세 줄만 같은 SHA로 바꾸는 branch와 PR을 제안합니다. PR은 자동 병합되지 않습니다. 이 세 pin만 바뀐 PR을 사람이 병합하면 홈서버 timer의 image-only fast-forward gate가 자동 적용할 수 있습니다.
+- cross-repository PR에는 Sensor Monitor 저장소의 Actions secret `BUGI_SERVER_INFRA_PR_TOKEN`을 사용합니다. 값은 bugi-server-infra 한 저장소만 선택한 fine-grained token이며 `Contents: Read and write`, `Pull requests: Read and write`만 부여합니다. 운영 환경변수와 홈서버 비밀값은 이 workflow에 전달하지 않습니다.
+- simulator CLI의 기능과 인자 정의는 이 저장소가 소유하지만 홈서버에서 사용할 인자는 bugi-server-infra Compose가 소유합니다. CLI 호환성을 깨거나 운영 인자를 바꿔야 하는 release는 image pin PR에 Compose command를 섞지 않고, 변경·검증·rollback 절차를 별도 수동 적용 handover로 전달합니다.
 - 독립 풀 데모가 만드는 이미지는 `sensor-monitor-backend:local`·`sensor-monitor-explain:local`·`sensor-monitor-simulator:local`로, 배포 이미지와 태그가 겹치지 않습니다.
 - 최초 발행된 GHCR 패키지는 **private**입니다. workflow의 OCI source 라벨은 이미지 출처와 저장소 연결을 명시할 뿐 visibility를 public으로 바꾸지 않습니다.
 - private 유지 시 홈서버가 GHCR 로그인 자격증명을 가져야 합니다. 공개 전환은 발행 후 패키지 설정에서 별도로 결정하며, workflow가 자동으로 바꾸지 않습니다.
@@ -727,15 +787,27 @@ ghcr.io/yeonji-p/sensor-monitor-simulator:<git-sha>
 
 ### freshness 오탐 억제
 
-센서는 정상적으로도 조용해집니다(계획 정지, 비가동, 점검). 침묵을 모두 알림으로 올리면 공장이 문을 닫을 때 장치 수만큼 알림이 쏟아집니다. 공장 현지 시각의 주간표와 날짜 예외를 먼저 평가해 계획 비가동·재개 유예 장치를 감시 분모에서 제외하고, 운영 중에는 같은 구역 장치가 동시에 침묵하면 사이트 단위 사건으로 한 건(`WARNING`), 이웃은 정상인데 혼자 침묵할 때만 개별 `CRITICAL` + explain 진단을 붙입니다. scheduler의 1배 기대 주기와 dashboard의 2배 표시 유예는 기존 목적이 달라 그대로 유지합니다.
+센서는 정상적으로도 조용해집니다(계획 정지, 비가동, 점검). 침묵을 모두 알림으로 올리면 공장이 문을 닫을 때 장치 수만큼 알림이 쏟아집니다. 공장 현지 시각의 주간표와 날짜 예외를 먼저 평가해 계획 비가동·재개 유예 장치를 감시 분모에서 제외하고, scheduler와 dashboard 모두 기대 주기의 2배를 `STALE` 경계로 사용합니다. 운영 중에는 같은 구역의 eligible 장치가 2대 이상이고 모두 침묵하면 사이트 단위 `ZONE_SILENCE/CRITICAL` 한 건, 일부만 침묵하면 장치별 `DEVICE_SILENCE/CRITICAL` episode로 분류합니다.
 
-캘린더 평가 시 현재 시각은 주입한 `Clock`의 `Instant` 하나를 공장 `ZoneId`로 변환합니다. 날짜 예외는 주간표보다 우선하고 구간은 반열림 `[start,end)`입니다. 매일 `00:00-24:00`처럼 자정에서 이어지는 일정은 하나의 연속 운영 episode로 보아 매일 유예를 다시 시작하지 않습니다. 캘린더가 없으면 24시간 fallback이며, 기존 freshness 알림은 감사 기록으로 남기고 삭제하거나 숨기지 않습니다. 캘린더는 Device/DeviceStatus 경계나 ingest·임계 alert를 변경하지 않습니다.
+캘린더 평가 시 현재 시각은 주입한 `Clock`의 `Instant` 하나를 공장 `ZoneId`로 변환합니다. 날짜 예외는 주간표보다 우선하고 구간은 반열림 `[start,end)`입니다. 매일 `00:00-24:00`처럼 자정에서 이어지는 일정은 하나의 연속 운영 episode로 보아 매일 유예를 다시 시작하지 않습니다. 캘린더가 없으면 24시간 fallback이며, 기존 episode와 alert는 감사 기록으로 남기고 삭제하거나 숨기지 않습니다. 캘린더는 Device/DeviceStatus 경계나 ingest·임계 threshold 탐지를 변경하지 않습니다.
+
+### 알람 episode와 notification 분리
+
+현재 이상 상태와 사용자에게 보여 준 발화 이력의 의미를 분리합니다. `alarm_episode`는 scope별로 동시에 하나만 OPEN일 수 있고 트리거 즉시 열리며, `alert`는 cooldown·acknowledgement·severity 상승 정책을 통과해 실제 발화한 시점만 기록합니다. 따라서 cooldown 중에도 대시보드의 현재 알람 수는 즉시 정확하고, recovery는 notification 수를 부풀리지 않습니다.
+
+episode snapshot은 발생 당시 threshold 방향·값·단위 또는 freshness 기대 주기·cohort 정보를 보존합니다. explain 결과도 이 snapshot을 기준으로 만들기 때문에 이후 설정 변경이 과거 판단 근거를 바꾸지 않습니다. ack는 episode를 종료하지 않고 같은 severity reminder만 억제하며, severity가 다시 상승하면 새 escalation을 허용합니다.
 
 ### 운영 캘린더 배포와 rollback
 
-V6 배포 전 DB backup과 복구 가능 여부를 확인하고, 빈 staging prod에서 Flyway history 1~6, Hibernate validate, 모든 공장의 calendar coverage를 먼저 검사합니다. 같은 commit SHA의 backend·explain·simulator 이미지를 발행한 뒤 personal-hub의 세 image pin도 같은 SHA로 갱신합니다. 배포 후 `/actuator/health`, 역할별 캘린더 API, 비운영시간 `PLANNED_OFFLINE`, 신규 freshness 알림 0건과 재개 유예 종료 후 정상 판정을 확인합니다.
+V6 배포 전 DB backup과 복구 가능 여부를 확인하고, 빈 staging prod에서 Flyway history 1~6, Hibernate validate, 모든 공장의 calendar coverage를 먼저 검사합니다. 같은 commit SHA의 backend·explain·simulator 이미지를 발행한 뒤 bugi-server-infra의 세 image pin도 같은 SHA로 갱신합니다. 배포 후 `/actuator/health`, 역할별 캘린더 API, 비운영시간 `PLANNED_OFFLINE`, 신규 freshness 알림 0건과 재개 유예 종료 후 정상 판정을 확인합니다.
 
 rollback은 backend 이미지만 이전 SHA로 되돌리고 additive V6 테이블은 보존합니다. 이전 backend는 V6 테이블을 무시하므로 동작하지만 운영 캘린더를 적용하지 않아 다시 24시간 freshness 알림을 만들 수 있습니다. V6 destructive down migration이나 V1~V5 checksum 변경은 하지 않습니다.
+
+### 알람 lifecycle 배포와 rollback
+
+V7~V9 배포 전 DB backup, nullable FK가 깨진 legacy alert 유무, channel/device 상태행 backfill 수, 중복 OPEN 후보를 staging에서 확인합니다. 빈 PostgreSQL의 V1→V9와 V6 데이터 snapshot upgrade, Hibernate validate를 통과한 같은 backend SHA만 배포합니다. 배포 후에는 동일 breach의 OPEN episode/INITIAL alert가 각각 1건인지, scheduler 재시작·동시 tick에도 freshness 중복이 없는지, explain 장애 중에도 ingest와 탐지가 성공하는지 확인합니다.
+
+V7~V9는 additive migration이라 rollback 시 이전 backend SHA로 되돌리고 새 테이블과 컬럼은 감사 데이터로 보존합니다. V7의 legacy INSERT trigger가 이전 backend가 생략하는 alert type/scope/reason을 보완하므로 rollback 중에도 기존 Alert 저장이 유지됩니다. destructive down migration이나 이미 적용된 migration checksum 변경은 하지 않습니다. SSE는 인프로세스 best-effort이므로 여러 backend 인스턴스에서 즉시 전달 보장이 필요하면 durable outbox를 별도 범위로 설계하고, 현재는 30초 overview/episode 조회를 복구 경로로 둡니다.
 
 ### explain 분석 서비스
 
@@ -743,7 +815,7 @@ rollback은 backend 이미지만 이전 SHA로 되돌리고 additive V6 테이�
 
 ### 수신 모델의 관례와 성능 보류
 
-- alert 종류는 별도 `alert_type` 없이 nullable 참조 조합으로 구분합니다. 임계 alert는 `device_id`·`channel_id`·`batch_id`와 값 스냅샷을 채우고, freshness alert는 `device_id`만 채웁니다. 현재 두 종류뿐이라 컬럼·migration을 늘리지 않으며, 제3의 alert 종류나 타입별 DB 조회·제약이 필요해질 때 명시 판별자를 추가합니다.
+- alert와 episode는 `alarm_type`·`scope_type`으로 명시적으로 구분합니다. 기존 alert의 nullable device/channel/batch 필드는 API 호환과 발생 근거를 위해 유지하고, lifecycle 정본은 `episode_id`로 연결합니다. migration 이전 legacy alert는 episode가 없을 수 있습니다.
 - 채널별 reading은 정규화 경계를 유지해 `sensor_reading`과 `measurement_batch`를 join하고 `observed_at`으로 정렬합니다. 조회 상한이 500건인 데모에서는 `sensor_reading.observed_at` 비정규화와 복합 인덱스를 보류하며, 실행 계획이나 부하 측정에서 이 join 정렬이 병목으로 확인되면 추가합니다.
 - 수신 엔티티 ID는 기존 `IDENTITY` 전략을 유지합니다. sequence 전환은 batch insert를 가능하게 하지만 migration과 모든 관련 엔티티의 생성 전략을 함께 바꿔야 하므로, 데모 처리량에서는 보류하고 실제 ingest 처리량 목표와 병목 측정이 생길 때 재검토합니다.
 

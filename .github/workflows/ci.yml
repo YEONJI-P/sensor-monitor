@@ -9,6 +9,7 @@ on:
       - "services/simulator/**"
       - ".github/workflows/ci.yml"
       - ".github/workflows/publish-images.yml"
+      - ".github/scripts/propose-bugi-server-infra-release.sh"
 
 # main push가 연달아 오면 최신 commit이 앞선 commit을 모두 포함하므로 오래된 run은 취소한다.
 concurrency:
@@ -85,8 +86,8 @@ jobs:
       services: all
       use_backend_artifact: true
 
-  propose-personal-hub-release:
-    name: Propose personal-hub release
+  propose-bugi-server-infra-release:
+    name: Propose bugi-server-infra release
     needs: publish-images
     runs-on: ubuntu-latest
     permissions:
@@ -95,17 +96,17 @@ jobs:
       - name: Checkout Sensor Monitor automation
         uses: actions/checkout@v4
 
-      - name: Checkout personal-hub
+      - name: Checkout bugi-server-infra
         uses: actions/checkout@v4
         with:
-          repository: ${{ github.repository_owner }}/personal-hub
+          repository: ${{ github.repository_owner }}/bugi-server-infra
           ref: main
-          path: personal-hub
-          token: ${{ secrets.PERSONAL_HUB_PR_TOKEN }}
+          path: bugi-server-infra
+          token: ${{ secrets.BUGI_SERVER_INFRA_PR_TOKEN }}
 
       - name: Update Sensor pin and open PR
         env:
-          GH_TOKEN: ${{ secrets.PERSONAL_HUB_PR_TOKEN }}
-          HUB_REPOSITORY: ${{ github.repository_owner }}/personal-hub
+          GH_TOKEN: ${{ secrets.BUGI_SERVER_INFRA_PR_TOKEN }}
+          INFRA_REPOSITORY: ${{ github.repository_owner }}/bugi-server-infra
           SOURCE_SHA: ${{ github.sha }}
-        run: bash .github/scripts/propose-personal-hub-release.sh personal-hub
+        run: bash .github/scripts/propose-bugi-server-infra-release.sh bugi-server-infra

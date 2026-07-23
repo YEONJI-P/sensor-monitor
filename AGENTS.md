@@ -8,7 +8,7 @@
 - Spring 실행: `./gradlew bootRun`
 - Spring 검증: `./gradlew test` 또는 변경 범위에 맞는 `--tests` 선택
 - 독립 풀 데모: 저장소 루트에서 `docker compose up --build` (원커맨드는 `make demo`).
-- 홈서버/prod 배포는 이 저장소가 아니라 personal-hub `infra`가 소유한다(compose·nginx·이미지 pin·ingest 키·배포 자동화). prod 계약은 personal-hub `CONTRACT.md`를 따른다.
+- 홈서버/prod 배포는 이 저장소가 아니라 bugi-server-infra가 소유한다(compose·nginx·이미지 pin·ingest 키·실행 인자·배포 자동화). prod 계약은 bugi-server-infra `CONTRACT.md`를 따른다.
 - simulator는 replay 일회성 프로파일과 synthetic live 프로파일을 구분한다. 정확한 인자는 `README.md`를 확인한다.
 - H2 context smoke test는 Spring 설정과 bean 부팅만 확인한다. repository 쿼리, 제약, PostgreSQL 타입은 Docker가 필요한 Testcontainers 테스트로 검증한다.
 
@@ -23,7 +23,7 @@
 
 - Spring health는 `/actuator/health`, explain health는 `/health`를 사용한다.
 - health는 무인증 `HTTP 200`과 `{"status":"UP"}`만 공개하고 내부 상세를 노출하지 않는다.
-- personal-hub 편입은 이 저장소의 내부 구현과 별개다. 이미지, 라우팅, 내부 감시 URL 계약은 personal-hub의 `CONTRACT.md`에서 관리한다.
+- bugi-server-infra 편입은 이 저장소의 내부 구현과 별개다. 이미지, 라우팅, 내부 감시 URL 계약은 bugi-server-infra의 `CONTRACT.md`에서 관리한다.
 
 ## 시각 처리
 

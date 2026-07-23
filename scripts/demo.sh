@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # 독립 풀 데모를 한 번에 띄운다: 컨테이너 기동 → 헬스 대기 → (필요 시) 시드 → 합성 스트림.
-# 로컬 데모 전용. 운영 배포는 personal-hub/infra가 담당한다.
+# 로컬 데모 전용. 운영 배포는 bugi-server-infra가 담당한다.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 

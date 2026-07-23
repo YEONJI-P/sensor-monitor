@@ -106,7 +106,7 @@ MeasurementBatch(device_id, recorded_at, source_sequence)
 - local 전용 권한 fixture와 Compose demo 흐름
 - 안정적인 장치 식별, synthetic 반복 simulator와 안전한 실패 처리
 - simulator SHA 이미지 발행 workflow
-- personal-hub의 simulator 서비스 편입
+- bugi-server-infra의 simulator 서비스 편입
 
 ## 재개 순서
 
@@ -142,4 +142,3 @@ A(채널=Device, scalar 1건=1행)로 실제 데이터를 태워 본 결과, 같
 - batch의 원본 payload 보존(`context JSONB`): 감사·재처리 필요가 확인될 때만 추가한다.
 
 두 확장점 모두 현재 채택한 B 계약에는 포함하지 않았다.
-
