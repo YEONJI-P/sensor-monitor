@@ -558,7 +558,7 @@ Spring이 스케줄러에서 HTTP로 호출하는 별도 서비스입니다. 탐
 - Java 17
 - 컨테이너 실행 시 Docker와 Docker Compose
 
-독립 풀 데모는 이 저장소의 `docker-compose.yml` 하나로 실행합니다(원커맨드는 `make demo`). 직접 개발 실행은 별도 Compose가 아닙니다. 홈서버/prod 배포는 이 저장소가 아니라 bugi-server-infra가 담당합니다.
+독립 풀 데모는 이 저장소의 `docker-compose.yml` 하나로 실행합니다(원커맨드는 `make demo`). 직접 개발 실행은 별도 Compose가 아닙니다. GCP VM/prod 배포는 이 저장소가 아니라 bugi-server-infra가 담당합니다.
 
 | 경로 | 파일 | PostgreSQL | 용도 |
 |---|---|---|---|
@@ -613,9 +613,11 @@ docker compose --profile live up -d simulator-live
 
 > 컨테이너 postgres는 호스트 `5433`, backend는 `8080`, explain은 `8000`에 노출됩니다. backend는 내부 네트워크의 `postgres:5432`를 사용하므로 서비스 env의 `DB_*` 값보다 Compose 토폴로지 값이 우선합니다. `SYSTEM_ADMIN` 계정 `SYSTEM`은 위 수동 seed 명령이 만들며 Compose 기동이나 Flyway가 만들지 않습니다. `docker compose down`은 volume을 유지하고, `down -v`는 데모 DB를 삭제하므로 데이터 삭제 의도가 있을 때만 사용합니다.
 
-### 홈서버 / prod 배포
+### GCP VM / prod 배포
 
-홈서버 배포는 이 저장소가 아니라 **bugi-server-infra**가 소유합니다: Compose·nginx 라우팅·이미지 SHA pin·ingest 공유 키·simulator 실행 인자·운영 관리자 bootstrap·배포 자동화(systemd timer)가 모두 그쪽에 있습니다. 이 저장소는 backend·explain·simulator 이미지와 Flyway 스키마·기준 토폴로지만 제공하고, prod 적용 계약(공개 origin·감시 URL·ingest 인증·이미지 배포 경계)은 bugi-server-infra `CONTRACT.md`를 따릅니다. `/sensor-data`는 내부 network에서만 `X-Ingest-Key`로 호출하고 public reverse proxy는 계속 차단합니다.
+GCP VM 배포는 **bugi-server-infra**가 소유합니다. Compose·nginx 라우팅·backend/explain 이미지 SHA pin·ingest 공유 키·운영 관리자 bootstrap·배포 자동화를 그쪽에서 관리합니다. 이 저장소는 backend·explain 운영 이미지와 Flyway 스키마·기준 토폴로지를 제공하고, prod 적용 계약(공개 origin·감시 URL·ingest 인증·이미지 배포 경계)은 bugi-server-infra `CONTRACT.md`를 따릅니다.
+
+simulator는 prod 서비스나 GHCR 배포 이미지로 관리하지 않고 로컬 PC에서 소스로 실행합니다. GCP VM의 public reverse proxy는 HTTPS `POST /sensor-data`만 backend로 전달하고 backend는 기존 `X-Ingest-Key`를 검증합니다. DB·explain 포트와 ingest 키는 공개하지 않으며, 외부 ingest에 대한 TLS·method 제한·rate limit·요청 크기 제한은 bugi-server-infra가 소유합니다.
 
 ### 테스트 실행
 
@@ -644,11 +646,11 @@ node services/backend/src/test/js/calendar-validation.test.js
 http://localhost:23100/swagger-ui/index.html
 ```
 
-> bootRun 기본 포트는 `23100`. 독립 풀 데모는 호스트 `8080`, 홈서버는 reverse proxy가 정한 공개 주소를 사용합니다.
+> bootRun 기본 포트는 `23100`. 독립 풀 데모는 호스트 `8080`, GCP VM prod는 reverse proxy가 정한 공개 HTTPS 주소를 사용합니다.
 
 ### 데모 초기 데이터 수동 투입 (`services/simulator/seed.sql`)
 
-local 직접 실행과 독립 풀 데모에서 Spring Boot 기동 후 스키마가 준비된 상태에 수동으로 한 번 실행합니다. prod와 홈서버 설치는 이 파일을 실행하지 않고 Flyway의 공장·구역·device·채널 토폴로지를 사용하며, 운영 관리자 bootstrap은 별도로 해결해야 합니다.
+local 직접 실행과 독립 풀 데모에서 Spring Boot 기동 후 스키마가 준비된 상태에 수동으로 한 번 실행합니다. GCP VM prod는 이 파일을 실행하지 않고 Flyway의 공장·구역·device·채널 토폴로지를 사용하며, 운영 관리자 bootstrap은 별도로 해결해야 합니다.
 
 > 기존 local DB가 이전 모델(방식 A, 채널=Device)로 이미 떠 있었다면 Hibernate `ddl-auto=update`는 컬럼·테이블을 삭제하지 않습니다. `device.type`·`device.threshold_value`·`sensor_data`·`device_status.in_alarm`/`last_alert_at`처럼 이번 전환에서 제거된 구 컬럼·테이블이 그대로 남아 새 엔티티·제약과 어긋날 수 있습니다. 이 모델 전환 이후의 로컬 개발은 기존 DB를 이어 쓰지 말고 빈 DB(스키마 재생성)에서 새로 시작하는 것을 권장합니다.
 
@@ -661,7 +663,7 @@ docker compose exec -T postgres psql -U sensor_monitor -d sensor_monitor < servi
 ```
 
 > 재실행이 필요한 경우 `seed.sql` 하단의 `TRUNCATE` 주석을 해제 후 먼저 실행하세요.
-> 이 파일의 알려진 관리자·구성원 비밀번호는 로컬 시연용입니다. 공개 홈서버나 운영 DB에 투입하지 않습니다. 아래 `SYSTEM` 계정도 이 수동 seed에서만 생성되며 Compose/Flyway가 자동 생성하지 않습니다.
+> 이 파일의 알려진 관리자·구성원 비밀번호는 로컬 시연용입니다. 공개 GCP VM이나 운영 DB에 투입하지 않습니다. 아래 `SYSTEM` 계정도 이 수동 seed에서만 생성되며 Compose/Flyway가 자동 생성하지 않습니다.
 
 투입되는 샘플 계정
 
@@ -694,6 +696,10 @@ python services/simulator/simulator.py --mode synthetic --all \
   --interval 10 --active-days mon-fri --active-hours 08:00-18:00 \
   --timezone Asia/Seoul
 
+# GCP VM prod: 로컬 PC에서 공개 HTTPS ingest 접점으로 전송
+python services/simulator/simulator.py --mode synthetic --all \
+  --interval 10 --base-url https://sensor.example.com
+
 # 테스트용 재현 가능 패턴 100건
 python services/simulator/simulator.py --mode synthetic --all --limit 100 --seed 42
 ```
@@ -702,17 +708,17 @@ python services/simulator/simulator.py --mode synthetic --all --limit 100 --seed
 
 `synthetic`은 `--limit 0`이 무제한이고 `Ctrl+C` 또는 컨테이너의 `SIGTERM`으로 정리 경로를 거쳐 종료합니다. 고정 `--seed`는 simulator 재시작을 요구하는 옵션이 아니라 같은 난수 순서를 재현하는 테스트 옵션이며, 생략하면 실행마다 다른 패턴을 만듭니다. 운영시간 밖에는 컨테이너를 종료하지 않고 전송만 대기합니다. 연결 실패 시 최대 60초까지 backoff하고 성공하면 원래 간격으로 돌아갑니다. simulator의 `mon-fri / 08:00-18:00 / Asia/Seoul` CLI 설정은 backend 캘린더를 조회하거나 동기화하지 않는 별도 실행 계약입니다.
 
-device는 `deviceCode`(`CMAPSS-U1`/`CMAPSS-U2`/`CNC-EXP01`)로 식별합니다. 이 code와 채널 code는 요청 대상 DB의 device/sensor_channel 데이터(독립 데모는 `seed.sql`, 홈서버 prod는 Flyway V3·V4)와 일치해야 합니다. 대표 채널은 C-MAPSS 장치당 6개(`s2,s4,s7,s11,s15,s21`), CNC 8개로 총 20개입니다. CNC 가속도 3축과 X축 전류는 양·음 편위를 함께 보는 `ABS_ABOVE`, 속도·feedrate 두 채널은 임계값 없는 표시 전용입니다. 현재 batch에는 replay/synthetic 출처 구분 필드가 없으므로 두 모드의 값을 같은 DB에 넣으면 데이터만 보고 출처를 구분할 수 없습니다.
+device는 `deviceCode`(`CMAPSS-U1`/`CMAPSS-U2`/`CNC-EXP01`)로 식별합니다. 이 code와 채널 code는 요청 대상 DB의 device/sensor_channel 데이터(독립 데모는 `seed.sql`, GCP VM prod는 Flyway V3·V4)와 일치해야 합니다. 대표 채널은 C-MAPSS 장치당 6개(`s2,s4,s7,s11,s15,s21`), CNC 8개로 총 20개입니다. CNC 가속도 3축과 X축 전류는 양·음 편위를 함께 보는 `ABS_ABOVE`, 속도·feedrate 두 채널은 임계값 없는 표시 전용입니다. 현재 batch에는 replay/synthetic 출처 구분 필드가 없으므로 두 모드의 값을 같은 DB에 넣으면 데이터만 보고 출처를 구분할 수 없습니다.
 
 ### 환경변수
 
 | 파일 | 필요한 실행 방식 | 사용자가 설정하는 값 |
 |---|---|---|
-| `services/backend/.env` | 독립 풀 데모·홈서버 | JWT 서명 키, 센서 수신 `INGEST_API_KEY`. 홈서버는 DB URL·사용자·비밀번호도 설정 |
+| `services/backend/.env` | 독립 풀 데모·GCP VM | JWT 서명 키, 센서 수신 `INGEST_API_KEY`. GCP VM은 DB URL·사용자·비밀번호도 설정 |
 | `services/simulator/.env` | replay·live simulator | backend와 같은 `INGEST_API_KEY` |
 | `services/explain/.env` | Gemini 사용 시에만 선택 | provider, API key, 필요한 경우 모델명 |
 
-독립 풀 데모는 backend의 DB 값·프로파일·포트·explain 내부 주소를 Compose가 덮어쓰므로 JWT만 교체하면 됩니다. 홈서버 DB URL의 host는 `localhost`가 아니라 외부 DB network에서 해석되는 PostgreSQL 서비스 이름이어야 합니다. 기본 echo provider는 explain `.env` 없이 동작합니다.
+독립 풀 데모는 backend의 DB 값·프로파일·포트·explain 내부 주소를 Compose가 덮어쓰므로 JWT만 교체하면 됩니다. GCP VM DB URL의 host는 배포 network에서 해석되는 PostgreSQL 서비스 이름이어야 합니다. 기본 echo provider는 explain `.env` 없이 동작합니다.
 
 `bootRun`은 `.env`를 자동으로 읽지 않으므로 직접 실행할 때는 셸이나 IDE에 환경변수를 주입합니다. simulator는 수신 키만 환경변수로 받고, 모드·간격·운영시간은 CLI 인자 또는 Compose의 `command`가 정합니다.
 
@@ -720,7 +726,7 @@ device는 `deviceCode`(`CMAPSS-U1`/`CMAPSS-U2`/`CNC-EXP01`)로 식별합니다. 
 
 - backend의 `prod` 프로파일은 Flyway migration을 먼저 실행하고 Hibernate는 `ddl-auto=validate`로 결과만 검증합니다. 첫 스키마는 `services/backend/src/main/resources/db/migration/V1__initial_schema.sql`입니다.
 - 독립 풀 데모 `docker-compose.yml`은 `SPRING_PROFILES_ACTIVE=local`을 명시하고 `ddl-auto=update` + `seed.sql` 경로를 유지합니다.
-- 홈서버/prod 배포(bugi-server-infra)는 `prod` 프로파일로 기존 PostgreSQL 인스턴스의 별도 database에 Flyway migration을 적용합니다.
+- GCP VM/prod 배포(bugi-server-infra)는 `prod` 프로파일로 PostgreSQL의 별도 database에 Flyway migration을 적용합니다.
 - 빈 운영 DB와 접속 role은 배포 인프라가 먼저 만들어야 합니다. Flyway는 DB/role 생성이나 백업 도구가 아니며, 이미 만들어진 DB 안에서 schema와 명시적으로 버전 관리하는 기준 데이터만 적용합니다.
 - V1은 schema만 만들고 checksum 고정을 위해 이후 수정하지 않습니다.
 - V2(`V2__normalized_ingest_model.sql`)는 수신 모델을 "채널=Device"에서 물리 Device ─ SensorChannel ─ MeasurementBatch ─ SensorReading 정규화 모델로 전환하는 DDL입니다. `device.type`·`device.threshold_value` 제거와 `device.code`(UK) 추가, `sensor_channel`·`measurement_batch`·`sensor_reading`·`channel_status` 신설, `alert`에 `channel_id`·`batch_id` 추가, scalar 텔레메트리 테이블 `sensor_data` 제거를 포함합니다.
@@ -731,7 +737,7 @@ device는 `deviceCode`(`CMAPSS-U1`/`CMAPSS-U2`/`CNC-EXP01`)로 식별합니다. 
 - V7(`V7__alarm_episode_lifecycle.sql`)은 영속 `alarm_episode`·acknowledgement, scope별 OPEN unique index, status mirror와 기존 `alert`의 명시적 alarm/scope/notification metadata를 추가합니다. 기존 `in_alarm=true` 채널만 제한적으로 legacy OPEN episode로 승격하고 과거 recovery 시점은 추측하지 않습니다.
 - V8(`V8__ingest_idempotency.sql`)은 `(device_code,event_id)` receipt와 결과 replay를 추가합니다. `source_seq`의 기존 non-unique 의미는 바꾸지 않습니다.
 - V9(`V9__alert_enrichment_claim_lease.sql`)은 explain 작업의 claim token·lease·시도 횟수·다음 재시도 시각을 추가합니다. 외부 HTTP 장애는 탐지·episode·notification 저장을 롤백하지 않습니다.
-- V2~V9 모두 사용자, 구역 소속, 비밀번호를 만들지 않습니다. 따라서 공개 홈서버의 첫 계정과 최소 권한 bootstrap 절차는 배포 전에 별도로 확정해야 합니다.
+- V2~V9 모두 사용자, 구역 소속, 비밀번호를 만들지 않습니다. 따라서 공개 GCP VM의 첫 계정과 최소 권한 bootstrap 절차는 배포 전에 별도로 확정해야 합니다.
 - 독립 풀 데모는 Flyway를 실행하지 않으므로 V2~V9가 적용되지 않습니다. device/채널·캘린더와 여러 역할 계정은 `services/simulator/seed.sql`을 수동 실행해 넣고, lifecycle 테이블은 Hibernate local 설정이 생성하며 같은 임계 계약은 애플리케이션 서비스가 검증합니다.
 - **seed.sql과 Flyway V3+V4+V6는 같은 최종 데모 토폴로지와 캘린더를 서로 다른 경로로 넣습니다.** 같은 DB에 둘 다 적용하지 않습니다. 로컬은 seed.sql과 Hibernate local schema, prod는 Flyway(V1~V9)를 사용합니다.
 - 운영 DB에 한 번 적용된 migration은 내용을 수정하지 않고 다음 변경을 새 `Vn__...sql` 파일로 추가합니다. V1~V9는 적용 후 checksum 불변 대상입니다.
@@ -752,26 +758,25 @@ Flyway history가 없는데 테이블이 들어 있는 DB는 prod 첫 기동이 
    이 기동은 V1 SQL을 실행하지 않고 기존 스키마를 version 1로 기록한 뒤 V2~V9를 적용하고 Hibernate validation을 수행합니다. migration이나 validation이 실패하면 배포를 중단하고 스키마·기존 데이터 차이를 수정해야 합니다.
 4. 성공을 확인한 즉시 두 변수를 제거하고 평소 prod 설정으로 다시 기동합니다. 애플리케이션 기본 설정에는 `baseline-on-migrate`를 켜 두지 않습니다.
 
-> 위 baseline 절차를 스키마가 불완전하거나 출처를 모르는 DB에 쓰면 V1을 실행한 것처럼 기록해 버립니다. 새 홈서버 DB처럼 빈 DB에는 baseline 변수를 주지 않고 Flyway가 V1을 직접 적용하게 합니다.
+> 위 baseline 절차를 스키마가 불완전하거나 출처를 모르는 DB에 쓰면 V1을 실행한 것처럼 기록해 버립니다. 새 GCP VM DB처럼 빈 DB에는 baseline 변수를 주지 않고 Flyway가 V1을 직접 적용하게 합니다.
 
 ### 배포 이미지 계약
 
-컨테이너 이미지는 GHCR 로 발행하고, 소비자(홈서버 등)는 아래 reference 를 **커밋 SHA 로 pin** 해서 씁니다.
+운영 컨테이너 이미지는 GHCR로 발행하고, GCP VM은 아래 reference를 **커밋 SHA로 pin**해서 씁니다.
 
 ```
 ghcr.io/yeonji-p/sensor-monitor-backend:<git-sha>
 ghcr.io/yeonji-p/sensor-monitor-explain:<git-sha>
-ghcr.io/yeonji-p/sensor-monitor-simulator:<git-sha>
 ```
 
 - **`latest` 는 발행하지 않습니다.** 같은 태그가 다른 코드를 가리키면 무엇이 돌고 있는지 확인할 수도, 되돌릴 좌표를 잡을 수도 없습니다.
-- main push의 CI(`ci.yml`)가 모든 테스트를 통과하면 `.github/workflows/publish-images.yml`을 호출해 세 이미지를 같은 SHA로 자동 발행합니다. `workflow_dispatch`는 선택 서비스 재발행용으로 유지합니다.
-- 세 이미지 발행이 성공하면 CI는 bugi-server-infra `docker-compose.yml`의 backend·explain·simulator image pin 세 줄만 같은 SHA로 바꾸는 branch와 PR을 제안합니다. PR은 자동 병합되지 않습니다. 이 세 pin만 바뀐 PR을 사람이 병합하면 홈서버 timer의 image-only fast-forward gate가 자동 적용할 수 있습니다.
-- cross-repository PR에는 Sensor Monitor 저장소의 Actions secret `BUGI_SERVER_INFRA_PR_TOKEN`을 사용합니다. 값은 bugi-server-infra 한 저장소만 선택한 fine-grained token이며 `Contents: Read and write`, `Pull requests: Read and write`만 부여합니다. 운영 환경변수와 홈서버 비밀값은 이 workflow에 전달하지 않습니다.
-- simulator CLI의 기능과 인자 정의는 이 저장소가 소유하지만 홈서버에서 사용할 인자는 bugi-server-infra Compose가 소유합니다. CLI 호환성을 깨거나 운영 인자를 바꿔야 하는 release는 image pin PR에 Compose command를 섞지 않고, 변경·검증·rollback 절차를 별도 수동 적용 handover로 전달합니다.
+- main push의 CI(`ci.yml`)가 backend·explain·simulator 테스트를 통과하면, 서버 배포 관련 변경이 있을 때만 `.github/workflows/publish-images.yml`을 호출해 backend·explain 이미지를 같은 SHA로 발행합니다. simulator만 바뀐 push는 테스트하되 서버 이미지를 발행하지 않습니다.
+- 두 이미지 발행이 성공하면 CI는 bugi-server-infra `docker-compose.yml`의 backend·explain image pin 두 줄만 같은 SHA로 바꾸는 branch와 PR을 제안합니다. PR은 자동 병합되지 않으며 simulator pin은 없습니다.
+- cross-repository PR에는 Sensor Monitor 저장소의 Actions secret `BUGI_SERVER_INFRA_PR_TOKEN`을 사용합니다. 값은 bugi-server-infra 한 저장소만 선택한 fine-grained token이며 `Contents: Read and write`, `Pull requests: Read and write`만 부여합니다. 운영 환경변수와 GCP VM 비밀값은 이 workflow에 전달하지 않습니다.
+- simulator는 이 저장소의 로컬 소스와 테스트 대상이며 GHCR prod 이미지를 발행하지 않습니다. 독립 데모의 `sensor-monitor-simulator:local` Docker 이미지는 계속 사용할 수 있습니다.
 - 독립 풀 데모가 만드는 이미지는 `sensor-monitor-backend:local`·`sensor-monitor-explain:local`·`sensor-monitor-simulator:local`로, 배포 이미지와 태그가 겹치지 않습니다.
 - 최초 발행된 GHCR 패키지는 **private**입니다. workflow의 OCI source 라벨은 이미지 출처와 저장소 연결을 명시할 뿐 visibility를 public으로 바꾸지 않습니다.
-- private 유지 시 홈서버가 GHCR 로그인 자격증명을 가져야 합니다. 공개 전환은 발행 후 패키지 설정에서 별도로 결정하며, workflow가 자동으로 바꾸지 않습니다.
+- private 유지 시 GCP VM이 GHCR 로그인 자격증명을 가져야 합니다. 공개 전환은 발행 후 패키지 설정에서 별도로 결정하며, workflow가 자동으로 바꾸지 않습니다.
 
 ---
 
@@ -799,7 +804,7 @@ episode snapshot은 발생 당시 threshold 방향·값·단위 또는 freshness
 
 ### 운영 캘린더 배포와 rollback
 
-V6 배포 전 DB backup과 복구 가능 여부를 확인하고, 빈 staging prod에서 Flyway history 1~6, Hibernate validate, 모든 공장의 calendar coverage를 먼저 검사합니다. 같은 commit SHA의 backend·explain·simulator 이미지를 발행한 뒤 bugi-server-infra의 세 image pin도 같은 SHA로 갱신합니다. 배포 후 `/actuator/health`, 역할별 캘린더 API, 비운영시간 `PLANNED_OFFLINE`, 신규 freshness 알림 0건과 재개 유예 종료 후 정상 판정을 확인합니다.
+V6 배포 전 DB backup과 복구 가능 여부를 확인하고, 빈 staging prod에서 Flyway history 1~6, Hibernate validate, 모든 공장의 calendar coverage를 먼저 검사합니다. 같은 commit SHA의 backend·explain 이미지를 발행한 뒤 bugi-server-infra의 두 image pin도 같은 SHA로 갱신합니다. 배포 후 `/actuator/health`, 역할별 캘린더 API, 비운영시간 `PLANNED_OFFLINE`, 신규 freshness 알림 0건과 재개 유예 종료 후 정상 판정을 확인합니다.
 
 rollback은 backend 이미지만 이전 SHA로 되돌리고 additive V6 테이블은 보존합니다. 이전 backend는 V6 테이블을 무시하므로 동작하지만 운영 캘린더를 적용하지 않아 다시 24시간 freshness 알림을 만들 수 있습니다. V6 destructive down migration이나 V1~V5 checksum 변경은 하지 않습니다.
 

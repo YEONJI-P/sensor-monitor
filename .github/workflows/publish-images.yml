@@ -1,7 +1,8 @@
-# backend·explain·simulator 컨테이너 이미지를 GHCR에 발행한다.
+# backend·explain 운영 컨테이너 이미지를 GHCR에 발행한다.
 #
-# main CI가 성공하면 reusable workflow로 호출해 세 이미지를 자동 발행한다. workflow_dispatch는
-# 선택 서비스 재발행용으로 유지한다. 발행만으로 홈서버 배포 버전은 바뀌지 않으며,
+# main CI가 성공하면 reusable workflow로 호출해 두 이미지를 자동 발행한다. workflow_dispatch는
+# 선택 서비스 재발행용으로 유지한다. simulator는 로컬에서 소스로 실행하며 운영 이미지를 발행하지 않는다.
+# 발행만으로 GCP VM 배포 버전은 바뀌지 않으며,
 # 소비자(bugi-server-infra)가 아래 불변 SHA를 명시적으로 pin해야 실제 배포된다.
 #
 # 태그 규칙: 커밋 SHA 하나만 붙인다. `latest` 는 만들지 않는다 —
@@ -26,7 +27,7 @@ on:
       services:
         description: 발행할 서비스
         type: choice
-        options: [all, backend, explain, simulator]
+        options: [all, backend, explain]
         default: all
 
 permissions:
@@ -46,9 +47,6 @@ jobs:
           - service: explain
             context: services/explain
             image: sensor-monitor-explain
-          - service: simulator
-            context: services/simulator
-            image: sensor-monitor-simulator
     steps:
       - name: Skip unselected service
         id: gate
