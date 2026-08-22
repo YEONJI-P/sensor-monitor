@@ -1,7 +1,7 @@
 name: sensor-monitor
 
 services:
-  # 독립 풀 데모 전용 DB. 홈서버 prod 배포는 bugi-server-infra가 기존 PostgreSQL의
+  # 독립 풀 데모 전용 DB. GCP VM prod 배포는 bugi-server-infra가 PostgreSQL의
   # 별도 sensor_monitor database를 사용하며 이 컨테이너를 만들지 않는다.
   postgres:
     image: postgres:15
