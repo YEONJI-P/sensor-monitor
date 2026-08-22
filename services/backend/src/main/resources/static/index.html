@@ -72,9 +72,9 @@
     <div id="loginError" class="hidden" role="alert" style="color:var(--alarm); font-size:.82rem; margin-bottom:.8rem;"></div>
     <div id="loginNotice" class="hidden" role="status" aria-live="polite" style="color:var(--signal); font-size:.82rem; margin-bottom:.8rem;"></div>
     <button id="loginBtn" class="btn btn-primary" style="width:100%; justify-content:center;">접속</button>
-    <div class="sample-account" aria-label="샘플 VIEWER 계정">
-      <span class="label">SAMPLE VIEWER</span><span class="value">ENG-VIEW · CNC-VIEW</span>
-      <span class="label">PASSWORD</span><span class="value">view1234!</span>
+    <div class="sample-account" aria-label="전체 열람 데모 계정">
+      <span class="label">DEMO ACCOUNT</span><span class="value">DEMO</span>
+      <span class="label">PASSWORD</span><span class="value">demo1234!</span>
     </div>
     <p class="faint" style="font-size:.76rem; margin-top:1rem; text-align:center;">
       계정이 없으면 관리자 승인이 필요합니다.
@@ -162,13 +162,14 @@
 <script src="/js/auth.js"></script>
 <script src="/js/factory-selection.js"></script>
 <script>
-  /* 역할 → 콘솔 진입점 (4역할 정합) */
+  /* 역할 → 콘솔 진입점 */
   const ENTRIES = {
     dashboard: { href: '/dashboard.html', code: 'TELEMETRY', title: '센서 대시보드', desc: '실시간 센서값, 임계값 초과 알림 모니터링' },
     console:   { href: '/console.html',   code: 'CONTROL',   title: '관리 콘솔',     desc: '사용자 승인, 공장·구역, 장치 관리' },
   };
   const ROLE_ENTRIES = {
     SYSTEM_ADMIN: ['dashboard', 'console'],
+    SYSTEM_VIEWER:['dashboard'],
     FACTORY_ADMIN: ['dashboard', 'console'],
     MEMBER:       ['dashboard', 'console'],
     VIEWER:       ['dashboard'],

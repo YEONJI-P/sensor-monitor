@@ -4,6 +4,7 @@ const assert = require('node:assert/strict');
 const {
   normalizeEpisodeEvent,
   mergeEpisodeState,
+  canAcknowledge,
 } = require('../../main/resources/static/js/dashboard.js');
 
 const flat = normalizeEpisodeEvent({
@@ -56,5 +57,11 @@ const enrichedWithoutAck = {
 const enrichedWithAck = mergeEpisodeState(acknowledgedOpen, enrichedWithoutAck);
 assert.equal(enrichedWithAck.evidence, 'new evidence');
 assert.equal(enrichedWithAck.latestAcknowledgement.createdAt, '2026-07-23T01:00:02Z');
+
+global.Auth = { getRole: () => 'SYSTEM_VIEWER' };
+assert.equal(canAcknowledge({ status: 'OPEN', currentSeverity: 'WARNING' }), false);
+global.Auth = { getRole: () => 'MEMBER' };
+assert.equal(canAcknowledge({ status: 'OPEN', currentSeverity: 'WARNING' }), true);
+delete global.Auth;
 
 console.log('dashboard episode tests passed');

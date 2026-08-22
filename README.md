@@ -41,7 +41,7 @@ GitHub: https://github.com/YEONJI-P/sensor-monitor
 
 제조 설비, 공장 환경에서 발생하는 센서 데이터를 수집하고, 임계값을 벗어난 이상 징후가 보이면 근거와 함께 알림을 생성하는 모니터링 백엔드입니다. 수집한 센서 시계열과 알림 이력은 영속 저장되어 사후 조회할 수 있습니다.
 
-사번(employeeId) 기반의 승인제 회원 관리와 4단계 역할 기반 접근 제어(RBAC)를 통해, 공장, 구역 단위로 접근 범위를 제한합니다.
+사번(employeeId) 기반의 승인제 회원 관리와 역할 기반 접근 제어(RBAC)를 제공합니다.
 
 ---
 
@@ -182,7 +182,7 @@ erDiagram
         varchar email "NULLABLE, UNIQUE"
         varchar password
         bigint factory_id FK "NULLABLE"
-        varchar role "SYSTEM_ADMIN/FACTORY_ADMIN/MEMBER/VIEWER"
+        varchar role "SYSTEM_ADMIN/SYSTEM_VIEWER/FACTORY_ADMIN/MEMBER/VIEWER"
         varchar status "PENDING/ACTIVE/REJECTED"
         timestamptz created_at
         timestamptz updated_at
@@ -375,7 +375,7 @@ Swagger UI: `http://localhost:23100/swagger-ui/index.html` (컨테이너 데모�
 | POST | `/devices` | 장치 등록 | JWT |
 | PUT | `/devices/{id}` | 장치 수정 | JWT |
 | DELETE | `/devices/{id}` | 장치 삭제 | JWT |
-| GET | `/zones` | 접근 가능한 구역 조회 (SYSTEM_ADMIN 전체, FACTORY_ADMIN 소속 공장, MEMBER·VIEWER 배정 구역) | JWT |
+| GET | `/zones` | 역할 범위 내 구역 조회 | JWT |
 
 ### Sensor Data
 
@@ -419,7 +419,7 @@ Swagger UI: `http://localhost:23100/swagger-ui/index.html` (컨테이너 데모�
 | GET | `/dashboard/stream?token=` | 접근 범위 내 센서, 알림 이벤트 실시간 스트림 | 쿼리 토큰 |
 | GET | `/dashboard/overview` | 접근 가능한 공장·구역·장치와 채널 최신 상태를 한 번에 조회 | JWT |
 
-> EventSource가 헤더를 못 실어 Access Token을 쿼리로 받습니다. 구독자는 자신의 접근 가능 장치로 이벤트가 필터링됩니다. `SYSTEM_ADMIN`은 전체, `FACTORY_ADMIN`은 소속 공장, `MEMBER`·`VIEWER`는 배정 구역의 telemetry를 조회합니다. `sensor-data` 이벤트는 batch 단위 판독과 `stateApplied`를, `alert` 이벤트는 실제 notification을, `alarm-episode` 이벤트는 `OPEN`·`RESOLVED`·`ACK`·`ENRICHED` 상태 변경을 전달합니다. 모두 DB 트랜잭션 커밋 후 전송하므로 rollback된 유령 이벤트는 없습니다. 연결이 닫히면 refresh token으로 access token을 갱신해 재구독하고, 30초 polling으로 인프로세스 SSE 유실을 보정합니다.
+> EventSource가 헤더를 못 실어 Access Token을 쿼리로 받습니다. 구독 이벤트는 `AccessControlService`가 계산한 장치·구역 범위로 필터링됩니다. `sensor-data` 이벤트는 batch 단위 판독과 `stateApplied`를, `alert` 이벤트는 실제 notification을, `alarm-episode` 이벤트는 `OPEN`·`RESOLVED`·`ACK`·`ENRICHED` 상태 변경을 전달합니다. 모두 DB 트랜잭션 커밋 후 전송하므로 rollback된 유령 이벤트는 없습니다. 연결이 닫히면 refresh token으로 access token을 갱신해 재구독하고, 30초 polling으로 인프로세스 SSE 유실을 보정합니다.
 
 > overview의 freshness는 `NOT_MONITORED`(기대 주기 미설정), `PLANNED_OFFLINE`(운영시간 밖), `RESUMING`(운영 재개 후 첫 수신 유예), `NEVER_SEEN`, `ONLINE`, `STALE` 여섯 단계입니다. 최근 데이터가 실제로 들어오면 비운영시간이나 유예 중에도 `ONLINE`이며, 그 밖에는 마지막 수신 후 기대 주기의 2배까지 `ONLINE`, 이후 `STALE`입니다. 요약 분모와 freshness 경고 lamp는 미감시·계획 비가동·재개 대기 장치를 제외합니다.
 
@@ -455,11 +455,12 @@ Spring이 스케줄러에서 HTTP로 호출하는 별도 서비스입니다. 탐
 - `FACTORY_ADMIN` 이상의 관리자가 승인 또는 반려(`REJECTED`) 처리. 승인 시 `ACTIVE` 전환과 함께 공장·역할 부여, 소속 구역 배정을 한 트랜잭션에서 수행
 - `SYSTEM_ADMIN`은 신청 공장을 승인 화면에서 교정할 수 있고 선택한 공장 소속 구역만 배정 가능. `FACTORY_ADMIN`은 대상의 자기 공장이 고정되며, 자기 공장 사용자만 조회·승인하고 자기 역할보다 낮은 역할만 부여
 - `PENDING`, `REJECTED` 상태에서 로그인 시 `DisabledException`으로 차단
-- 4단계 역할 기반 접근 제어
+- 역할 기반 접근 제어
 
   | 역할 | 범위 |
   |---|---|
   | `SYSTEM_ADMIN` | 전체 공장, 장치 |
+  | `SYSTEM_VIEWER` | 전체 운영 데이터 조회 |
   | `FACTORY_ADMIN` | 소속 공장의 telemetry 조회와 구역, 장치, 사용자 관리 |
   | `MEMBER` | 소속 구역 읽기, 쓰기 (장치 관리) |
   | `VIEWER` | 소속 구역 읽기 전용 (장치 변경 불가) |
@@ -530,7 +531,7 @@ Spring이 스케줄러에서 HTTP로 호출하는 별도 서비스입니다. 탐
 ### 완료
 
 - JWT 인증, 인가, 사번 기반 로그인, 승인제 가입
-- 4단계 역할 기반 접근 제어, 공장, 구역 계층 접근 제어
+- 역할 기반 접근 제어, 전체 시스템·공장·구역 계층 접근 제어
 - 가입 승인 워크플로 (역할 부여 + 구역 배정, FACTORY_ADMIN 소속 공장 스코핑)
 - 동기 센서 수신 파이프라인 (수신, 저장, 임계값 판정, 알림)
 - 이상 판정 로직 전략화 (`AnomalyDetector` 인터페이스로 분리)
@@ -611,7 +612,7 @@ docker compose --profile replay run --rm simulator-replay
 docker compose --profile live up -d simulator-live
 ```
 
-> 컨테이너 postgres는 호스트 `5433`, backend는 `8080`, explain은 `8000`에 노출됩니다. backend는 내부 네트워크의 `postgres:5432`를 사용하므로 서비스 env의 `DB_*` 값보다 Compose 토폴로지 값이 우선합니다. `SYSTEM_ADMIN` 계정 `SYSTEM`은 위 수동 seed 명령이 만들며 Compose 기동이나 Flyway가 만들지 않습니다. `docker compose down`은 volume을 유지하고, `down -v`는 데모 DB를 삭제하므로 데이터 삭제 의도가 있을 때만 사용합니다.
+> 컨테이너 postgres는 호스트 `5433`, backend는 `8080`, explain은 `8000`에 노출됩니다. backend는 내부 네트워크의 `postgres:5432`를 사용하므로 서비스 env의 `DB_*` 값보다 Compose 토폴로지 값이 우선합니다. 샘플 계정은 위 수동 seed 명령으로 생성합니다. `docker compose down`은 volume을 유지하고, `down -v`는 데모 DB를 삭제하므로 데이터 삭제 의도가 있을 때만 사용합니다.
 
 ### GCP VM / prod 배포
 
@@ -638,7 +639,7 @@ node services/backend/src/test/js/calendar-validation.test.js
 > 테스트는 세 갈래입니다.
 > - **컨텍스트 부팅 스모크**(`contextLoads`)는 인메모리 H2 로 동작해 별도 인프라 없이 실행됩니다(엔티티 매핑·설정 오류를 싸게 잡는 용도이며, DB 계층은 검증하지 않습니다). 설정은 `services/backend/src/test/resources/application.yml`.
 > - **DB 계층 검증**(리포지토리·네이티브 쿼리·제약·컬럼 타입)은 Testcontainers 로 프로덕션과 동일한 `postgres:15` 를 띄워 검증하므로 **로컬에 도커가 실행 중이어야 합니다**. 컨테이너는 한 번만 떠서 모든 리포지토리 테스트가 재사용합니다.
-> - **운영 스키마 검증**(`FlywayMigrationTest`)은 빈 `postgres:15`에 prod 프로파일을 적용해 Flyway V1~V9 실행, 공개 데모 토폴로지·채널 임계 계약·운영 캘린더·alarm lifecycle backfill과 Hibernate `ddl-auto=validate` 부팅을 함께 확인합니다.
+> - **운영 스키마 검증**(`FlywayMigrationTest`)은 빈 `postgres:15`에 prod 프로파일을 적용해 전체 Flyway migration, 공개 데모 토폴로지·채널 임계 계약·운영 캘린더·alarm lifecycle backfill과 Hibernate `ddl-auto=validate` 부팅을 함께 확인합니다.
 
 ### Swagger UI
 
@@ -650,7 +651,7 @@ http://localhost:23100/swagger-ui/index.html
 
 ### 데모 초기 데이터 수동 투입 (`services/simulator/seed.sql`)
 
-local 직접 실행과 독립 풀 데모에서 Spring Boot 기동 후 스키마가 준비된 상태에 수동으로 한 번 실행합니다. GCP VM prod는 이 파일을 실행하지 않고 Flyway의 공장·구역·device·채널 토폴로지를 사용하며, 운영 관리자 bootstrap은 별도로 해결해야 합니다.
+local 직접 실행과 독립 풀 데모에서 Spring Boot 기동 후 스키마가 준비된 상태에 수동으로 한 번 실행합니다. GCP VM prod는 이 파일을 실행하지 않고 Flyway의 공장·구역·device·채널 토폴로지를 사용하며 계정은 별도로 준비합니다.
 
 > 기존 local DB가 이전 모델(방식 A, 채널=Device)로 이미 떠 있었다면 Hibernate `ddl-auto=update`는 컬럼·테이블을 삭제하지 않습니다. `device.type`·`device.threshold_value`·`sensor_data`·`device_status.in_alarm`/`last_alert_at`처럼 이번 전환에서 제거된 구 컬럼·테이블이 그대로 남아 새 엔티티·제약과 어긋날 수 있습니다. 이 모델 전환 이후의 로컬 개발은 기존 DB를 이어 쓰지 말고 빈 DB(스키마 재생성)에서 새로 시작하는 것을 권장합니다.
 
@@ -663,13 +664,14 @@ docker compose exec -T postgres psql -U sensor_monitor -d sensor_monitor < servi
 ```
 
 > 재실행이 필요한 경우 `seed.sql` 하단의 `TRUNCATE` 주석을 해제 후 먼저 실행하세요.
-> 이 파일의 알려진 관리자·구성원 비밀번호는 로컬 시연용입니다. 공개 GCP VM이나 운영 DB에 투입하지 않습니다. 아래 `SYSTEM` 계정도 이 수동 seed에서만 생성되며 Compose/Flyway가 자동 생성하지 않습니다.
+> 이 파일의 알려진 비밀번호는 로컬 시연용입니다. 공개 GCP VM이나 운영 DB에 투입하지 않습니다. 아래 계정들은 이 수동 seed에서만 생성되며 Compose/Flyway가 자동 생성하지 않습니다.
 
 투입되는 샘플 계정
 
 | employeeId | 이름 | Role | password |
 |---|---|---|---|
 | `SYSTEM` | 시스템 관리자 | SYSTEM_ADMIN | `admin1234!` |
+| `DEMO` | 전체 열람 데모 | SYSTEM_VIEWER | `demo1234!` |
 | `ENG-ADMIN` | 엔진동 관리자 | FACTORY_ADMIN | `admin1234!` |
 | `CNC-ADMIN` | 가공동 관리자 | FACTORY_ADMIN | `admin1234!` |
 | `ENG-OP` | 엔진동 설비담당 | MEMBER | `op1234!` |
@@ -737,10 +739,11 @@ device는 `deviceCode`(`CMAPSS-U1`/`CMAPSS-U2`/`CNC-EXP01`)로 식별합니다. 
 - V7(`V7__alarm_episode_lifecycle.sql`)은 영속 `alarm_episode`·acknowledgement, scope별 OPEN unique index, status mirror와 기존 `alert`의 명시적 alarm/scope/notification metadata를 추가합니다. 기존 `in_alarm=true` 채널만 제한적으로 legacy OPEN episode로 승격하고 과거 recovery 시점은 추측하지 않습니다.
 - V8(`V8__ingest_idempotency.sql`)은 `(device_code,event_id)` receipt와 결과 replay를 추가합니다. `source_seq`의 기존 non-unique 의미는 바꾸지 않습니다.
 - V9(`V9__alert_enrichment_claim_lease.sql`)은 explain 작업의 claim token·lease·시도 횟수·다음 재시도 시각을 추가합니다. 외부 HTTP 장애는 탐지·episode·notification 저장을 롤백하지 않습니다.
-- V2~V9 모두 사용자, 구역 소속, 비밀번호를 만들지 않습니다. 따라서 공개 GCP VM의 첫 계정과 최소 권한 bootstrap 절차는 배포 전에 별도로 확정해야 합니다.
-- 독립 풀 데모는 Flyway를 실행하지 않으므로 V2~V9가 적용되지 않습니다. device/채널·캘린더와 여러 역할 계정은 `services/simulator/seed.sql`을 수동 실행해 넣고, lifecycle 테이블은 Hibernate local 설정이 생성하며 같은 임계 계약은 애플리케이션 서비스가 검증합니다.
-- **seed.sql과 Flyway V3+V4+V6는 같은 최종 데모 토폴로지와 캘린더를 서로 다른 경로로 넣습니다.** 같은 DB에 둘 다 적용하지 않습니다. 로컬은 seed.sql과 Hibernate local schema, prod는 Flyway(V1~V9)를 사용합니다.
-- 운영 DB에 한 번 적용된 migration은 내용을 수정하지 않고 다음 변경을 새 `Vn__...sql` 파일로 추가합니다. V1~V9는 적용 후 checksum 불변 대상입니다.
+- V10(`V10__add_system_viewer_role.sql`)은 사용자 역할 CHECK 제약에 `SYSTEM_VIEWER`를 추가합니다.
+- V2~V10은 사용자와 구역 소속을 만들지 않습니다. GCP VM의 계정은 별도로 준비합니다.
+- 독립 풀 데모는 Flyway를 실행하지 않으므로 V2~V10이 적용되지 않습니다. device/채널·캘린더와 여러 역할 계정은 `services/simulator/seed.sql`을 수동 실행해 넣고, lifecycle 테이블은 Hibernate local 설정이 생성하며 같은 임계 계약은 애플리케이션 서비스가 검증합니다.
+- **seed.sql과 Flyway V3+V4+V6는 같은 최종 데모 토폴로지와 캘린더를 서로 다른 경로로 넣습니다.** 같은 DB에 둘 다 적용하지 않습니다. 로컬은 seed.sql과 Hibernate local schema, prod는 Flyway(V1~V10)를 사용합니다.
+- 운영 DB에 한 번 적용된 migration은 내용을 수정하지 않고 다음 변경을 새 `Vn__...sql` 파일로 추가합니다. V1~V10은 적용 후 checksum 불변 대상입니다.
 
 #### Hibernate가 이미 만든 DB의 1회 전환
 
@@ -755,7 +758,7 @@ Flyway history가 없는데 테이블이 들어 있는 DB는 prod 첫 기동이 
    SPRING_FLYWAY_BASELINE_VERSION=1
    ```
 
-   이 기동은 V1 SQL을 실행하지 않고 기존 스키마를 version 1로 기록한 뒤 V2~V9를 적용하고 Hibernate validation을 수행합니다. migration이나 validation이 실패하면 배포를 중단하고 스키마·기존 데이터 차이를 수정해야 합니다.
+   이 기동은 V1 SQL을 실행하지 않고 기존 스키마를 version 1로 기록한 뒤 V2~V10을 적용하고 Hibernate validation을 수행합니다. migration이나 validation이 실패하면 배포를 중단하고 스키마·기존 데이터 차이를 수정해야 합니다.
 4. 성공을 확인한 즉시 두 변수를 제거하고 평소 prod 설정으로 다시 기동합니다. 애플리케이션 기본 설정에는 `baseline-on-migrate`를 켜 두지 않습니다.
 
 > 위 baseline 절차를 스키마가 불완전하거나 출처를 모르는 DB에 쓰면 V1을 실행한 것처럼 기록해 버립니다. 새 GCP VM DB처럼 빈 DB에는 baseline 변수를 주지 않고 Flyway가 V1을 직접 적용하게 합니다.
@@ -788,7 +791,7 @@ ghcr.io/yeonji-p/sensor-monitor-explain:<git-sha>
 
 ### 접근 제어 계층
 
-공장(Factory), 구역(Zone), 구역 소속(ZoneUser) 3계층으로 접근 범위를 계산합니다. `SYSTEM_ADMIN`은 전체, `FACTORY_ADMIN`은 소속 공장, `MEMBER`와 `VIEWER`는 소속 구역으로 범위가 좁혀지며, `VIEWER`는 읽기 전용으로 장치 변경이 차단됩니다.
+공장(Factory), 구역(Zone), 구역 소속(ZoneUser) 3계층으로 접근 범위를 계산합니다. `SYSTEM_ADMIN`과 `SYSTEM_VIEWER`는 전체, `FACTORY_ADMIN`은 소속 공장, `MEMBER`와 `VIEWER`는 소속 구역 범위를 사용합니다. 읽기 전용 여부는 `Role.isReadOnly()`로 구분합니다.
 
 ### freshness 오탐 억제
 

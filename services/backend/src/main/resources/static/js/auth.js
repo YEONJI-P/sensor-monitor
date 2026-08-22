@@ -1,6 +1,6 @@
 /* ============================================================
    공유 인증/세션 유틸 — window.Auth
-   - 4역할 단일 소스(SYSTEM_ADMIN/FACTORY_ADMIN/MEMBER/VIEWER)
+   - 역할 라벨 단일 소스
    - apiFetch: 401 시 /auth/refresh 1회 자동 시도 후 재요청
    ============================================================ */
 (function () {
@@ -9,6 +9,7 @@
 
   const ROLE_LABEL = {
     SYSTEM_ADMIN: { text: 'SYSTEM ADMIN', cls: 'tag-alarm' },
+    SYSTEM_VIEWER:{ text: 'SYSTEM VIEWER',cls: 'tag-brand' },
     FACTORY_ADMIN: { text: 'FACTORY ADMIN', cls: 'tag-brand' },
     MEMBER:       { text: 'MEMBER',        cls: 'tag-signal' },
     VIEWER:       { text: 'VIEWER',        cls: '' },

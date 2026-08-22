@@ -2,7 +2,8 @@
 (function () {
   'use strict';
 
-  const ALLOWED = ['SYSTEM_ADMIN', 'FACTORY_ADMIN', 'MEMBER', 'VIEWER'];
+  const ALLOWED = ['SYSTEM_ADMIN', 'SYSTEM_VIEWER', 'FACTORY_ADMIN', 'MEMBER', 'VIEWER'];
+  const READ_ONLY_ROLES = ['SYSTEM_VIEWER', 'VIEWER'];
   const RAW_POINT_LIMIT = 500;
   const CHART_POINT_LIMIT = 300;
   const DEFAULT_WINDOW_MINUTES = 5;
@@ -789,7 +790,8 @@
   }
 
   function canAcknowledge(episode) {
-    if (!episode || episode.status !== 'OPEN' || (typeof Auth !== 'undefined' && Auth.getRole() === 'VIEWER')) return false;
+    if (!episode || episode.status !== 'OPEN'
+      || (typeof Auth !== 'undefined' && READ_ONLY_ROLES.includes(Auth.getRole()))) return false;
     const ack = episode.latestAcknowledgement;
     const acknowledgedCurrentNotification = ack
       && (SEVERITY_RANK[ack.ackSeverity] || 0) >= (SEVERITY_RANK[episode.currentSeverity] || 0)
@@ -1064,7 +1066,7 @@
   if (typeof module === 'object' && module.exports) {
     module.exports = {
       normalizeReadings, filterTimeWindow, downsampleEvenly, mergeReadings, matchAlertMarkers,
-      normalizeEpisodeEvent, mergeEpisodeState,
+      normalizeEpisodeEvent, mergeEpisodeState, canAcknowledge,
     };
   }
   if (typeof document !== 'undefined') document.addEventListener('DOMContentLoaded', boot);

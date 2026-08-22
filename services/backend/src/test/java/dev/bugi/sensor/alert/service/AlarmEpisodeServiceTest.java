@@ -125,6 +125,17 @@ class AlarmEpisodeServiceTest {
     }
 
     @Test
+    void system_viewer는_service_경계에서도_ack가_거부된다() {
+        User viewer = mock(User.class);
+        when(viewer.getRole()).thenReturn(Role.SYSTEM_VIEWER);
+        when(accessControlService.getUser("DEMO")).thenReturn(viewer);
+
+        assertThatThrownBy(() -> service.acknowledge("DEMO", 1L))
+                .isInstanceOf(AccessDeniedException.class);
+        verifyNoInteractions(episodeRepository, acknowledgementRepository);
+    }
+
+    @Test
     void 목록의_device_filter가_접근범위를_벗어나면_거부한다() {
         User user = mock(User.class);
         when(accessControlService.getUser("EMP001")).thenReturn(user);

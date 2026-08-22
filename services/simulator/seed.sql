@@ -50,9 +50,10 @@ INSERT INTO zones (factory_id, name, description, created_at) VALUES
 -- =============================================================================
 -- 3. Users  (password: BCrypt strength=10)
 -- =============================================================================
--- 계정 = {공장}-{역할}로 직관화. 비밀번호는 역할별(admin1234! / op1234! / view1234!).
+-- 역할별 접근 범위를 확인하는 local demo 계정.
 INSERT INTO users (employee_id, name, email, password, role, status, factory_id, created_at, updated_at) VALUES
     ('SYSTEM',    '시스템 관리자',   'system@sensor.local',    crypt('admin1234!', gen_salt('bf', 10)), 'SYSTEM_ADMIN',  'ACTIVE', NULL, NOW(), NOW()),
+    ('DEMO',      '전체 열람 데모',   'demo@sensor.local',      crypt('demo1234!',  gen_salt('bf', 10)), 'SYSTEM_VIEWER', 'ACTIVE', NULL, NOW(), NOW()),
     ('ENG-ADMIN', '엔진동 관리자',   'eng-admin@sensor.local', crypt('admin1234!', gen_salt('bf', 10)), 'FACTORY_ADMIN', 'ACTIVE', (SELECT id FROM factories WHERE name = '엔진시험동'), NOW(), NOW()),
     ('CNC-ADMIN', '가공동 관리자',   'cnc-admin@sensor.local', crypt('admin1234!', gen_salt('bf', 10)), 'FACTORY_ADMIN', 'ACTIVE', (SELECT id FROM factories WHERE name = '가공동'),     NOW(), NOW()),
     ('ENG-OP',    '엔진동 설비담당', 'eng-op@sensor.local',    crypt('op1234!',    gen_salt('bf', 10)), 'MEMBER',        'ACTIVE', (SELECT id FROM factories WHERE name = '엔진시험동'), NOW(), NOW()),
