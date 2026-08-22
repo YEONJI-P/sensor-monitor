@@ -106,7 +106,6 @@ public class AccessControlService {
         assertCanAccessDevice(user, channel.getDevice());
     }
 
-    // 읽기 전용 역할은 장치 등록·수정·삭제 불가
     public void assertCanMutateDevice(User user) {
         if (user.getRole().isReadOnly()) {
             throw new AccessDeniedException("열람 전용 계정은 장치를 변경할 수 없어요");

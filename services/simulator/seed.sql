@@ -50,8 +50,7 @@ INSERT INTO zones (factory_id, name, description, created_at) VALUES
 -- =============================================================================
 -- 3. Users  (password: BCrypt strength=10)
 -- =============================================================================
--- DEMO는 전체 운영 데이터를 보는 공개 읽기 전용 계정이며 공장·구역에 배정하지 않는다.
--- 나머지 계정은 {공장}-{역할}로 직관화한다.
+-- 역할별 접근 범위를 확인하는 local demo 계정.
 INSERT INTO users (employee_id, name, email, password, role, status, factory_id, created_at, updated_at) VALUES
     ('SYSTEM',    '시스템 관리자',   'system@sensor.local',    crypt('admin1234!', gen_salt('bf', 10)), 'SYSTEM_ADMIN',  'ACTIVE', NULL, NOW(), NOW()),
     ('DEMO',      '전체 열람 데모',   'demo@sensor.local',      crypt('demo1234!',  gen_salt('bf', 10)), 'SYSTEM_VIEWER', 'ACTIVE', NULL, NOW(), NOW()),

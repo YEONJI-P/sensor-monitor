@@ -89,13 +89,13 @@ public class SecurityConfig {
                         .requestMatchers(HttpMethod.GET, "/alerts", "/alerts/**")
                         .hasAnyRole("SYSTEM_ADMIN", "SYSTEM_VIEWER", "FACTORY_ADMIN", "MEMBER", "VIEWER")
 
-                        // alarm episode 조회는 운영 조회 역할 전체, ack는 읽기 전용 역할을 제외한다.
+                        // alarm episode 조회와 ack 권한 분리
                         .requestMatchers(HttpMethod.POST, "/alarm-episodes/*/ack")
                         .hasAnyRole("SYSTEM_ADMIN", "FACTORY_ADMIN", "MEMBER")
                         .requestMatchers(HttpMethod.GET, "/alarm-episodes", "/alarm-episodes/**")
                         .hasAnyRole("SYSTEM_ADMIN", "SYSTEM_VIEWER", "FACTORY_ADMIN", "MEMBER", "VIEWER")
 
-                        // 채널 조회 — 센서 데이터 조회와 같은 계열(읽기 전용 역할 허용)
+                        // 채널 조회 — 센서 데이터 조회와 같은 역할
                         .requestMatchers(HttpMethod.GET, "/channels", "/channels/**")
                         .hasAnyRole("SYSTEM_ADMIN", "SYSTEM_VIEWER", "FACTORY_ADMIN", "MEMBER", "VIEWER")
 
@@ -103,7 +103,7 @@ public class SecurityConfig {
                         .requestMatchers(HttpMethod.GET, "/zones")
                         .hasAnyRole("SYSTEM_ADMIN", "SYSTEM_VIEWER", "FACTORY_ADMIN", "MEMBER", "VIEWER")
 
-                        // 채널 변경(등록·임계 수정) — 장치 변경과 같은 계열. 읽기 전용 역할은 제외.
+                        // 채널 변경(등록·임계 수정) — 장치 변경과 같은 역할
                         // 등록은 /devices/{deviceId}/channels 아래라 device POST 규칙보다 먼저 둔다.
                         .requestMatchers(HttpMethod.POST, "/devices/*/channels")
                         .hasAnyRole("SYSTEM_ADMIN", "FACTORY_ADMIN", "MEMBER")
@@ -111,7 +111,7 @@ public class SecurityConfig {
                         .hasAnyRole("SYSTEM_ADMIN", "FACTORY_ADMIN", "MEMBER")
 
                         // 장치 변경(등록·수정·삭제) — SYSTEM_ADMIN, 소속 공장 FACTORY_ADMIN, 소속 구역 MEMBER.
-                        // 세부 범위(공장/구역)는 서비스 계층에서 스코핑. 읽기 전용 역할은 제외.
+                        // 세부 범위(공장/구역)는 서비스 계층에서 스코핑.
                         .requestMatchers(HttpMethod.POST, "/devices")
                         .hasAnyRole("SYSTEM_ADMIN", "FACTORY_ADMIN", "MEMBER")
                         .requestMatchers(HttpMethod.PUT, "/devices/**")
