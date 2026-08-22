@@ -31,6 +31,7 @@ import java.util.List;
 import java.util.Optional;
 
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
@@ -71,6 +72,37 @@ class FactoryCalendarAdminServiceTest {
 
         assertThatThrownBy(() -> service.get("ADMIN", 2L)).isInstanceOf(AccessDeniedException.class);
         verifyNoInteractions(calendarRepository);
+    }
+
+    @Test
+    void system_viewer는_모든_공장_캘린더_요약을_조회한다() {
+        User viewer = mock(User.class);
+        when(viewer.getRole()).thenReturn(Role.SYSTEM_VIEWER);
+        when(accessControlService.getUser("DEMO")).thenReturn(viewer);
+        Factory first = mock(Factory.class);
+        Factory second = mock(Factory.class);
+        when(first.getId()).thenReturn(1L);
+        when(first.getName()).thenReturn("A 공장");
+        when(second.getId()).thenReturn(2L);
+        when(second.getName()).thenReturn("B 공장");
+        when(factoryRepository.findAll()).thenReturn(List.of(second, first));
+
+        var summaries = service.summaries("DEMO");
+
+        assertThat(summaries).extracting(summary -> summary.factoryName())
+                .containsExactly("A 공장", "B 공장");
+    }
+
+    @Test
+    void system_viewer는_캘린더를_변경할_수_없다() {
+        User viewer = mock(User.class);
+        when(viewer.getRole()).thenReturn(Role.SYSTEM_VIEWER);
+        when(accessControlService.getUser("DEMO")).thenReturn(viewer);
+
+        assertThatThrownBy(() -> service.replace("DEMO", 1L, validRequest(0L)))
+                .isInstanceOf(AccessDeniedException.class);
+        verifyNoInteractions(factoryRepository, calendarRepository, weeklyRepository,
+                overrideRepository, overrideIntervalRepository);
     }
 
     @Test

@@ -59,6 +59,13 @@ public class SecurityConfig {
                         .requestMatchers(HttpMethod.POST, "/sensor-data")
                         .hasAuthority("INGEST")
 
+                        // 관리 콘솔 조회 — SYSTEM_VIEWER는 전체 설정을 열람하되 아래 변경 규칙에는 포함하지 않는다.
+                        .requestMatchers(HttpMethod.GET, "/admin/factories/**")
+                        .hasAnyRole("SYSTEM_ADMIN", "SYSTEM_VIEWER")
+                        .requestMatchers(HttpMethod.GET, "/admin/factory-calendars/**",
+                                "/admin/zones/**", "/admin/**")
+                        .hasAnyRole("SYSTEM_ADMIN", "SYSTEM_VIEWER", "FACTORY_ADMIN")
+
                         // 공장 관리 — SYSTEM_ADMIN만
                         .requestMatchers("/admin/factory-calendars/**")
                         .hasAnyRole("SYSTEM_ADMIN", "FACTORY_ADMIN")

@@ -63,9 +63,9 @@ public class FactoryCalendarAdminService {
 
     @Transactional(readOnly = true)
     public List<Summary> summaries(String employeeId) {
-        User user = requireAdmin(employeeId);
+        User user = requireReader(employeeId);
         List<Factory> factories;
-        if (user.getRole() == Role.SYSTEM_ADMIN) {
+        if (user.getRole().hasGlobalReadScope()) {
             factories = factoryRepository.findAll().stream()
                     .sorted(Comparator.comparing(Factory::getName)).toList();
         } else {
@@ -81,7 +81,7 @@ public class FactoryCalendarAdminService {
 
     @Transactional(readOnly = true)
     public Detail get(String employeeId, Long factoryId) {
-        User user = requireAdmin(employeeId);
+        User user = requireReader(employeeId);
         Factory factory = getFactory(factoryId);
         assertScope(user, factoryId);
         FactoryOperatingCalendar calendar = calendarRepository.findById(factoryId).orElse(null);
@@ -172,13 +172,23 @@ public class FactoryCalendarAdminService {
         return user;
     }
 
+    private User requireReader(String employeeId) {
+        User user = accessControlService.getUser(employeeId);
+        if (user.getRole() != Role.SYSTEM_ADMIN
+                && user.getRole() != Role.SYSTEM_VIEWER
+                && user.getRole() != Role.FACTORY_ADMIN) {
+            throw new AccessDeniedException("운영 캘린더 조회 권한이 없어요");
+        }
+        return user;
+    }
+
     private Factory getFactory(Long factoryId) {
         return factoryRepository.findById(factoryId)
                 .orElseThrow(() -> new ResponseStatusException(NOT_FOUND, "존재하지 않는 공장이에요"));
     }
 
     private static void assertScope(User user, Long factoryId) {
-        if (user.getRole() == Role.SYSTEM_ADMIN) return;
+        if (user.getRole().hasGlobalReadScope()) return;
         if (user.getFactory() == null || !factoryId.equals(user.getFactory().getId())) {
             throw new AccessDeniedException("본인 공장의 운영 캘린더만 관리할 수 있어요");
         }

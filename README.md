@@ -460,7 +460,7 @@ Spring이 스케줄러에서 HTTP로 호출하는 별도 서비스입니다. 탐
   | 역할 | 범위 |
   |---|---|
   | `SYSTEM_ADMIN` | 전체 공장, 장치 |
-  | `SYSTEM_VIEWER` | 전체 운영 데이터 조회 |
+  | `SYSTEM_VIEWER` | 전체 운영 데이터와 관리 설정 조회(변경 불가) |
   | `FACTORY_ADMIN` | 소속 공장의 telemetry 조회와 구역, 장치, 사용자 관리 |
   | `MEMBER` | 소속 구역 읽기, 쓰기 (장치 관리) |
   | `VIEWER` | 소속 구역 읽기 전용 (장치 변경 불가) |

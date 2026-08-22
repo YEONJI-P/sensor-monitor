@@ -298,6 +298,13 @@ public class SecurityConfigTest {
     }
 
     @Test
+    @WithMockUser(roles = "SYSTEM_VIEWER")
+    void get_admin_factory_with_system_viewer_is_allowed() throws Exception {
+        mockMvc.perform(get("/admin/factories"))
+                .andExpect(status().is(not(403)));
+    }
+
+    @Test
     void get_factory_calendar_without_auth_is_unauthorized() throws Exception {
         mockMvc.perform(get("/admin/factory-calendars"))
                 .andExpect(status().isUnauthorized());
@@ -310,6 +317,27 @@ public class SecurityConfigTest {
         given(factoryCalendarAdminService.summaries("SYSTEM")).willReturn(List.of());
         mockMvc.perform(get("/admin/factory-calendars"))
                 .andExpect(status().isOk());
+    }
+
+    @Test
+    @WithMockUser(username = "DEMO", roles = "SYSTEM_VIEWER")
+    void get_factory_calendar_with_system_viewer_is_allowed() throws Exception {
+        given(factoryCalendarAdminService.summaries("DEMO")).willReturn(List.of());
+        mockMvc.perform(get("/admin/factory-calendars"))
+                .andExpect(status().isOk());
+    }
+
+    @Test
+    @WithMockUser(roles = "SYSTEM_VIEWER")
+    void put_factory_calendar_with_system_viewer_is_forbidden() throws Exception {
+        mockMvc.perform(put("/admin/factory-calendars/1")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("""
+                                {"timezone":"Asia/Seoul","resumeGraceSeconds":300,"revision":0,
+                                 "weeklyIntervals":[],"dateOverrides":[]}
+                                """))
+                .andExpect(status().isForbidden());
+        verifyNoInteractions(factoryCalendarAdminService);
     }
 
     @Test
@@ -348,6 +376,24 @@ public class SecurityConfigTest {
                         .content("{\"name\":\"새 공장\"}"))
                 .andExpect(status().isForbidden());
         verifyNoInteractions(factoryService);
+    }
+
+    @Test
+    @WithMockUser(roles = "SYSTEM_VIEWER")
+    void post_admin_factory_with_system_viewer_is_forbidden() throws Exception {
+        mockMvc.perform(post("/admin/factories")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"name\":\"새 공장\"}"))
+                .andExpect(status().isForbidden());
+        verifyNoInteractions(factoryService);
+    }
+
+    @Test
+    @WithMockUser(roles = "SYSTEM_VIEWER")
+    void patch_admin_user_with_system_viewer_is_forbidden() throws Exception {
+        mockMvc.perform(patch("/admin/users/1/reject"))
+                .andExpect(status().isForbidden());
+        verifyNoInteractions(adminService);
     }
 
     @Test
@@ -674,10 +720,10 @@ public class SecurityConfigTest {
 
     @Test
     @WithMockUser(roles = "SYSTEM_VIEWER")
-    void get_admin_users_system_viewer_forbidden() throws Exception {
+    void get_admin_users_system_viewer_allowed() throws Exception {
         mockMvc.perform(get("/admin/users"))
-                .andExpect(status().isForbidden());
-        verifyNoInteractions(adminService);
+                .andExpect(status().isOk());
+        verify(adminService).getAllUsers(null);
     }
 
     private BatchIngestResult result(BatchIngestResult.Outcome outcome) {

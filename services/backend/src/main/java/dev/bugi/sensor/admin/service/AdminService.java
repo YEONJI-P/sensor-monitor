@@ -33,7 +33,7 @@ public class AdminService {
     @Transactional(readOnly = true)
     public List<UserResponse> getPendingUsers(String employeeId) {
         User caller = getCaller(employeeId);
-        List<User> users = isSystemAdmin(caller)
+        List<User> users = caller.getRole().hasGlobalReadScope()
                 ? userRepository.findAllByStatus(UserStatus.PENDING)
                 : userRepository.findAllByFactory_IdAndStatus(callerFactoryId(caller), UserStatus.PENDING);
         return users.stream().map(UserResponse::new).toList();
@@ -42,7 +42,7 @@ public class AdminService {
     @Transactional(readOnly = true)
     public List<UserResponse> getAllUsers(String employeeId) {
         User caller = getCaller(employeeId);
-        List<User> users = isSystemAdmin(caller)
+        List<User> users = caller.getRole().hasGlobalReadScope()
                 ? userRepository.findAll()
                 : userRepository.findAllByFactory_Id(callerFactoryId(caller));
         return users.stream().map(UserResponse::new).toList();

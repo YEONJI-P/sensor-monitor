@@ -51,6 +51,7 @@
   }
   /* mutation: 성공 메시지 반환. 실패 시 throw */
   async function apiMutate(url, method, body, okFallback) {
+    if (READ_ONLY) throw new Error('열람 전용 계정은 설정을 변경할 수 없습니다.');
     const opts = { method };
     if (body !== undefined) opts.body = JSON.stringify(body);
     const res = await Auth.apiFetch(url, opts);
@@ -80,15 +81,16 @@
   })();
 
   /* ── 탭 정의 (역할 게이팅) ── */
+  const role = Auth.getRole();
+  const READ_ONLY = role === 'SYSTEM_VIEWER' || role === 'VIEWER';
   const TABS = [
-    { key: 'users',    label: '사용자 승인', roles: ['SYSTEM_ADMIN', 'FACTORY_ADMIN'], render: renderUsers },
-    { key: 'factories',label: '공장',        roles: ['SYSTEM_ADMIN'],              render: renderFactories },
-    { key: 'calendars',label: '운영 캘린더', roles: ['SYSTEM_ADMIN', 'FACTORY_ADMIN'], render: renderCalendars },
-    { key: 'zones',    label: '구역',        roles: ['SYSTEM_ADMIN', 'FACTORY_ADMIN'], render: renderZones },
-    { key: 'devices',  label: '장치',        roles: ['SYSTEM_ADMIN', 'FACTORY_ADMIN', 'MEMBER'], render: renderDevices },
+    { key: 'users',    label: '사용자',       roles: ['SYSTEM_ADMIN', 'SYSTEM_VIEWER', 'FACTORY_ADMIN'], render: renderUsers },
+    { key: 'factories',label: '공장',         roles: ['SYSTEM_ADMIN', 'SYSTEM_VIEWER'], render: renderFactories },
+    { key: 'calendars',label: '운영 캘린더',  roles: ['SYSTEM_ADMIN', 'SYSTEM_VIEWER', 'FACTORY_ADMIN'], render: renderCalendars },
+    { key: 'zones',    label: '구역',         roles: ['SYSTEM_ADMIN', 'SYSTEM_VIEWER', 'FACTORY_ADMIN'], render: renderZones },
+    { key: 'devices',  label: '장치',         roles: ['SYSTEM_ADMIN', 'SYSTEM_VIEWER', 'FACTORY_ADMIN', 'MEMBER'], render: renderDevices },
   ];
 
-  const role = Auth.getRole();
   const allowed = TABS.filter(t => t.roles.includes(role));
 
   const panel = $('#tabPanel');
@@ -168,7 +170,7 @@
     function renderStatus(message, kind) {
       const node = $('#calendarMessage', root);
       if (!node) return;
-      node.textContent = message || (dirty ? '저장하지 않은 변경이 있습니다.' : '저장된 일정입니다.');
+      node.textContent = message || (READ_ONLY ? '열람 전용' : (dirty ? '저장하지 않은 변경이 있습니다.' : '저장된 일정입니다.'));
       node.className = `calendar-message${kind ? ` ${kind}` : ''}`;
     }
 
@@ -186,7 +188,7 @@
       if (!draft) { setEmpty(editor, '편집할 공장이 없습니다.'); return; }
       const weeklyByDay = new Map(DAYS.map(([key]) => [key, []]));
       draft.weeklyIntervals.forEach((interval) => weeklyByDay.get(interval.dayOfWeek)?.push(interval));
-      editor.innerHTML = `<fieldset id="calendarFieldset" ${saving ? 'disabled' : ''} style="border:0; min-width:0;">
+      editor.innerHTML = `<fieldset id="calendarFieldset" ${saving || READ_ONLY ? 'disabled' : ''} style="border:0; min-width:0;">
         <div class="calendar-settings">
           <div class="field"><label for="calendarTimezone">IANA timezone</label>
             <input class="input mono" id="calendarTimezone" list="timezoneOptions" value="${escapeHtml(draft.timezone)}"/>
@@ -224,7 +226,7 @@
     }
 
     function renderFactoryControl() {
-      if (role === 'SYSTEM_ADMIN') {
+      if (role === 'SYSTEM_ADMIN' || role === 'SYSTEM_VIEWER') {
         factoryControl.innerHTML = `<label class="hint" for="calendarFactory">공장</label><select class="input" id="calendarFactory">${summaries.map((summary) => `<option value="${summary.factoryId}" ${String(summary.factoryId) === String(selectedFactoryId) ? 'selected' : ''}>${escapeHtml(summary.factoryName)}</option>`).join('')}</select>`;
         $('#calendarFactory', root)?.addEventListener('change', (event) => loadDetail(event.target.value, false));
       } else {
@@ -244,6 +246,7 @@
     }
 
     async function save() {
+      if (READ_ONLY) return;
       const request = payload();
       const validation = CalendarValidation.validate(request);
       if (!validation.valid) { renderStatus(validation.errors.join('\n'), 'error'); return; }
@@ -260,6 +263,7 @@
     }
 
     editor.addEventListener('input', (event) => {
+      if (READ_ONLY) return;
       if (!draft) return;
       if (event.target.id === 'calendarTimezone') draft.timezone = event.target.value;
       else if (event.target.id === 'calendarGrace') draft.resumeGraceSeconds = Number(event.target.value);
@@ -272,6 +276,7 @@
       markDirty();
     });
     editor.addEventListener('change', (event) => {
+      if (READ_ONLY) return;
       if (event.target.dataset.action !== 'override-field') return;
       const override = draft.dateOverrides[Number(event.target.dataset.index)];
       override[event.target.dataset.field] = event.target.value;
@@ -279,6 +284,7 @@
       markDirty(); renderEditor();
     });
     editor.addEventListener('click', (event) => {
+      if (READ_ONLY) return;
       const button = event.target.closest('[data-action]'); if (!button || !draft) return;
       const action = button.dataset.action;
       if (action === 'save') { save(); return; }
@@ -342,7 +348,7 @@
     function renderTable(users) {
       const rows = users.map(u => {
         const statusCls = STATUS_TAG[u.status] || '';
-        const actions = u.status === 'PENDING'
+        const actions = !READ_ONLY && u.status === 'PENDING'
           ? `<div class="actions-cell">
                <button class="btn btn-sm btn-primary" data-act="approve" data-id="${u.id}">승인</button>
                <button class="btn btn-sm btn-danger" data-act="reject" data-id="${u.id}">반려</button>
@@ -559,14 +565,14 @@
      ========================================================== */
   function renderFactories(root) {
     root.innerHTML = `
-      <div class="panel panel-pad">
+      ${READ_ONLY ? '' : `<div class="panel panel-pad">
         <div class="eyebrow" style="margin-bottom:.9rem;">CREATE · 공장 등록</div>
         <div class="form-grid">
           <div class="field"><label for="fName">이름</label><input id="fName" class="input" type="text" placeholder="예: 1공장"/></div>
           <div class="field"><label for="fDesc">설명</label><input id="fDesc" class="input" type="text" placeholder="설명(선택)"/></div>
           <div class="field"><button id="fCreate" class="btn btn-primary">등록</button></div>
         </div>
-      </div>
+      </div>`}
       <div class="panel">
         <div class="panel-head"><div class="flex items-center gap-sm"><span class="lamp ok"></span><h3>공장 목록</h3></div></div>
         <div class="table-wrap" id="facList"><div class="empty">불러오는 중…</div></div>
@@ -579,19 +585,19 @@
         const items = await apiGet('/admin/factories');
         if (!items || items.length === 0) { setEmpty(listNode, '등록된 공장이 없습니다.'); return; }
         listNode.innerHTML = `<table class="table">
-          <thead><tr><th>ID</th><th>이름</th><th>설명</th><th>액션</th></tr></thead>
+          <thead><tr><th>ID</th><th>이름</th><th>설명</th>${READ_ONLY ? '' : '<th>액션</th>'}</tr></thead>
           <tbody>${items.map(f => `<tr>
             <td class="num dim">${f.id}</td>
             <td>${escapeHtml(f.name)}</td>
             <td class="dim">${escapeHtml(f.description) || '—'}</td>
-            <td><div class="actions-cell">
+            ${READ_ONLY ? '' : `<td><div class="actions-cell">
               <button class="btn btn-sm" data-act="edit" data-id="${f.id}"
                 data-name="${escapeHtml(f.name)}" data-desc="${escapeHtml(f.description || '')}">수정</button>
               <button class="btn btn-sm btn-danger" data-act="del" data-id="${f.id}"
                 data-name="${escapeHtml(f.name)}">삭제</button>
-            </div></td>
+            </div></td>`}
           </tr>`).join('')}</tbody></table>`;
-        bind();
+        if (!READ_ONLY) bind();
       } catch (e) { setError(listNode, e.message); }
     }
 
@@ -634,7 +640,7 @@
       } catch (e) { toast(e.message, true); }
     }
 
-    $('#fCreate', root).addEventListener('click', create);
+    if (!READ_ONLY) $('#fCreate', root).addEventListener('click', create);
     load();
   }
 
@@ -643,7 +649,7 @@
      ========================================================== */
   function renderZones(root) {
     root.innerHTML = `
-      <div class="panel panel-pad">
+      ${READ_ONLY ? '' : `<div class="panel panel-pad">
         <div class="eyebrow" style="margin-bottom:.9rem;">CREATE · 구역 등록</div>
         <div class="form-grid">
           <div class="field"><label for="zFactory">공장</label>
@@ -656,7 +662,7 @@
           <div class="field"><label for="zDesc">설명</label><input id="zDesc" class="input" type="text" placeholder="설명(선택)"/></div>
           <div class="field"><button id="zCreate" class="btn btn-primary">등록</button></div>
         </div>
-      </div>
+      </div>`}
       <div class="panel">
         <div class="panel-head"><div class="flex items-center gap-sm"><span class="lamp ok"></span><h3>구역 목록</h3></div></div>
         <div class="table-wrap" id="zoneList"><div class="empty">불러오는 중…</div></div>
@@ -669,6 +675,7 @@
 
     /* 공장 옵션: SYSTEM_ADMIN은 /admin/factories, FACTORY_ADMIN은 구역 결과에서 distinct 유도 */
     function fillFactoryOptions(list) {
+      if (READ_ONLY) return;
       if (list && list.length) {
         facSelect.innerHTML = list.map(f => `<option value="${f.id}">${escapeHtml(f.name)}</option>`).join('');
         facSelect.parentElement.classList.remove('hidden');
@@ -681,6 +688,7 @@
     }
 
     async function loadFactoryOptions(zones) {
+      if (READ_ONLY) return;
       if (isSysAdmin) {
         try {
           const facs = await apiGet('/admin/factories');
@@ -701,12 +709,12 @@
         await loadFactoryOptions(zones);
         if (!zones || zones.length === 0) { setEmpty(listNode, '등록된 구역이 없습니다.'); return; }
         listNode.innerHTML = `<table class="table">
-          <thead><tr><th>공장</th><th>이름</th><th>설명</th><th>액션</th><th>구역 사용자</th></tr></thead>
+          <thead><tr><th>공장</th><th>이름</th><th>설명</th>${READ_ONLY ? '' : '<th>액션</th><th>구역 사용자</th>'}</tr></thead>
           <tbody>${zones.map(z => `<tr>
             <td class="dim">${escapeHtml(z.factoryName) || '#' + z.factoryId}</td>
             <td>${escapeHtml(z.name)}</td>
             <td class="dim">${escapeHtml(z.description) || '—'}</td>
-            <td><div class="actions-cell">
+            ${READ_ONLY ? '' : `<td><div class="actions-cell">
               <button class="btn btn-sm" data-act="edit" data-id="${z.id}" data-fid="${z.factoryId}"
                 data-name="${escapeHtml(z.name)}" data-desc="${escapeHtml(z.description || '')}">수정</button>
               <button class="btn btn-sm btn-danger" data-act="del" data-id="${z.id}" data-name="${escapeHtml(z.name)}">삭제</button>
@@ -715,9 +723,9 @@
               <button class="btn btn-sm btn-ghost" data-act="uadd" data-id="${z.id}">사용자 추가</button>
               <button class="btn btn-sm btn-ghost" data-act="udel" data-id="${z.id}">사용자 제거</button>
               <div class="hint" style="flex-basis:100%;">user id 입력</div>
-            </div></td>
+            </div></td>`}
           </tr>`).join('')}</tbody></table>`;
-        bind();
+        if (!READ_ONLY) bind();
       } catch (e) { setError(listNode, e.message); }
     }
 
@@ -795,7 +803,7 @@
       } catch (e) { toast(e.message, true); }
     }
 
-    $('#zCreate', root).addEventListener('click', create);
+    if (!READ_ONLY) $('#zCreate', root).addEventListener('click', create);
     load();
   }
 
@@ -811,7 +819,7 @@
           <label for="deviceZoneFilter">구역 필터</label>
           <select id="deviceZoneFilter" class="input"><option value="">전체 구역</option></select>
         </div>
-        <button id="deviceCreate" class="btn btn-primary">장치 등록</button>
+        ${READ_ONLY ? '' : '<button id="deviceCreate" class="btn btn-primary">장치 등록</button>'}
       </div>
       <div class="device-master-detail">
         <section class="panel">
@@ -1012,10 +1020,10 @@
       detailNode.innerHTML = `
         <div class="detail-head">
           <div><div class="eyebrow">DEVICE · ${escapeHtml(device.code)}</div><h3 style="margin-top:.3rem;">${escapeHtml(device.name)}</h3></div>
-          <div class="actions-cell">
+          ${READ_ONLY ? '' : `<div class="actions-cell">
             <button class="btn btn-sm" data-device-edit>수정</button>
             <button class="btn btn-sm btn-danger" data-device-delete>삭제</button>
-          </div>
+          </div>`}
         </div>
         <dl class="detail-summary">
           <div class="detail-item"><dt>구역</dt><dd>${escapeHtml(device.zoneName) || `#${device.zoneId}`}</dd></div>
@@ -1026,13 +1034,15 @@
         <div class="detail-section">
           <div class="detail-head">
             <div><div class="eyebrow">CHILD · CHANNELS</div><h3 style="margin-top:.3rem;">채널</h3></div>
-            <button class="btn btn-sm btn-primary" data-channel-create>채널 등록</button>
+            ${READ_ONLY ? '' : '<button class="btn btn-sm btn-primary" data-channel-create>채널 등록</button>'}
           </div>
           <div class="table-wrap" data-channel-list><div class="empty">불러오는 중…</div></div>
         </div>`;
-      $('[data-device-edit]', detailNode).addEventListener('click', () => openDeviceModal(device));
-      $('[data-device-delete]', detailNode).addEventListener('click', () => removeDevice(device));
-      $('[data-channel-create]', detailNode).addEventListener('click', () => openChannelModal(null));
+      if (!READ_ONLY) {
+        $('[data-device-edit]', detailNode).addEventListener('click', () => openDeviceModal(device));
+        $('[data-device-delete]', detailNode).addEventListener('click', () => removeDevice(device));
+        $('[data-channel-create]', detailNode).addEventListener('click', () => openChannelModal(null));
+      }
     }
 
     async function selectDevice(id) {
@@ -1053,19 +1063,21 @@
         if (token !== channelLoadToken || String(deviceId) !== String(selectedDeviceId)) return;
         if (channels.length === 0) { setEmpty(channelList, '등록된 채널이 없습니다.'); return; }
         channelList.innerHTML = `<table class="table">
-          <thead><tr><th>코드</th><th>단위</th><th>측정 종류</th><th>임계값</th><th>방향</th><th>액션</th></tr></thead>
+          <thead><tr><th>코드</th><th>단위</th><th>측정 종류</th><th>임계값</th><th>방향</th>${READ_ONLY ? '' : '<th>액션</th>'}</tr></thead>
           <tbody>${channels.map(c => `<tr>
             <td class="mono">${escapeHtml(c.code)}</td>
             <td class="dim">${escapeHtml(c.unit) || '—'}</td>
             <td class="dim">${escapeHtml(c.quantityKind) || '—'}</td>
             <td class="num">${c.thresholdValue != null ? escapeHtml(String(c.thresholdValue)) : '—'}</td>
             <td class="dim">${escapeHtml(c.thresholdDirection) || '—'}</td>
-            <td><div class="actions-cell"><button class="btn btn-sm" data-channel-id="${c.id}">수정</button></div></td>
+            ${READ_ONLY ? '' : `<td><div class="actions-cell"><button class="btn btn-sm" data-channel-id="${c.id}">수정</button></div></td>`}
           </tr>`).join('')}</tbody></table>`;
-        channelList.querySelectorAll('[data-channel-id]').forEach(button => {
-          const channel = channels.find(c => String(c.id) === button.dataset.channelId);
-          button.addEventListener('click', () => openChannelModal(channel));
-        });
+        if (!READ_ONLY) {
+          channelList.querySelectorAll('[data-channel-id]').forEach(button => {
+            const channel = channels.find(c => String(c.id) === button.dataset.channelId);
+            button.addEventListener('click', () => openChannelModal(channel));
+          });
+        }
       } catch (e) {
         if (token === channelLoadToken) setError(channelList, e.message);
       }
@@ -1118,10 +1130,12 @@
       renderDeviceDetail(selected);
       if (selected) await loadChannels(selected.id);
     });
-    $('#deviceCreate', root).addEventListener('click', () => {
-      if (zones.length === 0) { toast('장치를 등록할 수 있는 구역이 없습니다.', true); return; }
-      openDeviceModal(null);
-    });
+    if (!READ_ONLY) {
+      $('#deviceCreate', root).addEventListener('click', () => {
+        if (zones.length === 0) { toast('장치를 등록할 수 있는 구역이 없습니다.', true); return; }
+        openDeviceModal(null);
+      });
+    }
     load();
   }
 

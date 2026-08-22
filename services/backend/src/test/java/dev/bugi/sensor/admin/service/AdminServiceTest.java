@@ -88,6 +88,18 @@ class AdminServiceTest {
     }
 
     @Test
+    void system_viewer의_사용자_목록은_전체_범위로_조회한다() {
+        User viewer = caller(Role.SYSTEM_VIEWER, null);
+        when(userRepository.findByEmployeeId("DEMO")).thenReturn(Optional.of(viewer));
+        when(userRepository.findAll()).thenReturn(List.of());
+
+        adminService.getAllUsers("DEMO");
+
+        verify(userRepository).findAll();
+        verify(userRepository, never()).findAllByFactory_Id(any());
+    }
+
+    @Test
     void system_admin은_요청한_공장으로_기존_소속을_교정하고_구역을_배정한다() {
         User caller = caller(Role.SYSTEM_ADMIN, null);
         User target = pendingTarget(10L, 1L);
