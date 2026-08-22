@@ -103,7 +103,7 @@ class AccessControlServiceTest {
         return zu;
     }
 
-    // ── getAccessibleDeviceIds : 4 role 분기 + factory null ────────────
+    // ── getAccessibleDeviceIds : 역할 분기 + factory null ─────────────
 
     @Test
     void accessibleDeviceIds_system_admin_returns_all() {
@@ -111,6 +111,15 @@ class AccessControlServiceTest {
         when(deviceRepository.findAllIds()).thenReturn(List.of(1L, 2L, 3L));
 
         assertThat(accessControlService.getAccessibleDeviceIds(admin)).containsExactly(1L, 2L, 3L);
+    }
+
+    @Test
+    void accessibleDeviceIds_system_viewer_returns_all() {
+        User viewer = user(Role.SYSTEM_VIEWER, 4L, null);
+        when(deviceRepository.findAllIds()).thenReturn(List.of(1L, 2L, 3L));
+
+        assertThat(accessControlService.getAccessibleDeviceIds(viewer)).containsExactly(1L, 2L, 3L);
+        verifyNoInteractions(zoneUserRepository);
     }
 
     @Test
@@ -158,6 +167,17 @@ class AccessControlServiceTest {
         when(zoneRepository.findAll()).thenReturn(List.of(first, second));
 
         assertThat(accessControlService.getAccessibleZones(admin)).containsExactly(first, second);
+    }
+
+    @Test
+    void accessibleZones_system_viewer_returns_all() {
+        User viewer = user(Role.SYSTEM_VIEWER, 4L, null);
+        Zone first = zoneOfFactory(100L, 10L);
+        Zone second = zoneOfFactory(200L, 20L);
+        when(zoneRepository.findAll()).thenReturn(List.of(first, second));
+
+        assertThat(accessControlService.getAccessibleZones(viewer)).containsExactly(first, second);
+        verifyNoInteractions(zoneUserRepository);
     }
 
     @Test
@@ -227,6 +247,15 @@ class AccessControlServiceTest {
     }
 
     @Test
+    void assertCanAccessDevice_system_viewer_always_allowed() {
+        User viewer = user(Role.SYSTEM_VIEWER, 4L, null);
+        Device device = deviceInZone(100L, 10L);
+
+        assertDoesNotThrow(() -> accessControlService.assertCanAccessDevice(viewer, device));
+        verifyNoInteractions(zoneUserRepository);
+    }
+
+    @Test
     void assertCanAccessDevice_factory_admin_same_factory_allowed() {
         User admin = user(Role.FACTORY_ADMIN, 1L, 10L);
         Device device = deviceInZone(100L, 10L);
@@ -286,12 +315,18 @@ class AccessControlServiceTest {
                 () -> accessControlService.assertCanAccessDevice(member, device));
     }
 
-    // ── assertCanMutateDevice : VIEWER 만 차단 ─────────────────────────
+    // ── assertCanMutateDevice : 읽기 전용 역할 차단 ────────────────────
 
     @Test
     void assertCanMutateDevice_viewer_forbidden() {
         assertThrows(AccessDeniedException.class,
                 () -> accessControlService.assertCanMutateDevice(user(Role.VIEWER, 3L, null)));
+    }
+
+    @Test
+    void assertCanMutateDevice_system_viewer_forbidden() {
+        assertThrows(AccessDeniedException.class,
+                () -> accessControlService.assertCanMutateDevice(user(Role.SYSTEM_VIEWER, 4L, null)));
     }
 
     @Test
@@ -324,6 +359,13 @@ class AccessControlServiceTest {
     void assertCanManageZone_system_admin_allowed() {
         assertDoesNotThrow(() -> accessControlService.assertCanManageZone(
                 user(Role.SYSTEM_ADMIN, 1L, null), zoneOfFactory(100L, 10L)));
+    }
+
+    @Test
+    void assertCanManageZone_system_viewer_forbidden() {
+        assertThrows(AccessDeniedException.class, () -> accessControlService.assertCanManageZone(
+                user(Role.SYSTEM_VIEWER, 4L, null), zoneOfFactory(100L, 10L)));
+        verifyNoInteractions(zoneUserRepository);
     }
 
     @Test

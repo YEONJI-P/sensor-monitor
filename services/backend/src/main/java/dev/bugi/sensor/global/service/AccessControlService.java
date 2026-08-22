@@ -43,7 +43,7 @@ public class AccessControlService {
 
     @Transactional(readOnly = true)
     public List<Device> getAccessibleDevices(User user) {
-        if (user.getRole() == Role.SYSTEM_ADMIN) {
+        if (user.getRole().hasGlobalReadScope()) {
             return deviceRepository.findAll();
         }
         if (user.getRole() == Role.FACTORY_ADMIN) {
@@ -58,7 +58,7 @@ public class AccessControlService {
     @Transactional(readOnly = true)
     public List<Long> getAccessibleDeviceIds(User user) {
         // id만 필요하므로 전 경로에서 id 프로젝션으로 조회 (엔티티 전량로드 회피)
-        if (user.getRole() == Role.SYSTEM_ADMIN) {
+        if (user.getRole().hasGlobalReadScope()) {
             return deviceRepository.findAllIds();
         }
         if (user.getRole() == Role.FACTORY_ADMIN) {
@@ -72,7 +72,7 @@ public class AccessControlService {
 
     @Transactional(readOnly = true)
     public List<Zone> getAccessibleZones(User user) {
-        if (user.getRole() == Role.SYSTEM_ADMIN) {
+        if (user.getRole().hasGlobalReadScope()) {
             return zoneRepository.findAll();
         }
         if (user.getRole() == Role.FACTORY_ADMIN) {
@@ -85,7 +85,7 @@ public class AccessControlService {
 
     @Transactional(readOnly = true)
     public void assertCanAccessDevice(User user, Device device) {
-        if (user.getRole() == Role.SYSTEM_ADMIN) return;
+        if (user.getRole().hasGlobalReadScope()) return;
         if (user.getRole() == Role.FACTORY_ADMIN) {
             if (user.getFactory() == null ||
                     device.getZone() == null ||
@@ -106,15 +106,18 @@ public class AccessControlService {
         assertCanAccessDevice(user, channel.getDevice());
     }
 
-    // VIEWER는 읽기 전용 — 장치 등록·수정·삭제 불가
+    // 읽기 전용 역할은 장치 등록·수정·삭제 불가
     public void assertCanMutateDevice(User user) {
-        if (user.getRole() == Role.VIEWER) {
+        if (user.getRole().isReadOnly()) {
             throw new AccessDeniedException("열람 전용 계정은 장치를 변경할 수 없어요");
         }
     }
 
     @Transactional(readOnly = true)
     public void assertCanManageZone(User user, Zone zone) {
+        if (user.getRole().isReadOnly()) {
+            throw new AccessDeniedException("열람 전용 계정은 구역을 변경할 수 없어요");
+        }
         if (user.getRole() == Role.SYSTEM_ADMIN) return;
         if (user.getRole() == Role.FACTORY_ADMIN) {
             if (user.getFactory() == null ||

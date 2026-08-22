@@ -77,7 +77,7 @@ public class AlarmEpisodeService {
     @Transactional
     public AlarmEpisodeResponse acknowledge(String employeeId, Long episodeId) {
         User actor = accessControlService.getUser(employeeId);
-        if (actor.getRole() == dev.bugi.sensor.user.entity.Role.VIEWER) {
+        if (actor.getRole().isReadOnly()) {
             throw new AccessDeniedException("열람 전용 계정은 알람을 확인 처리할 수 없어요");
         }
         AccessScope access = new AccessScope(

@@ -267,6 +267,13 @@ public class SecurityConfigTest {
     }
 
     @Test
+    @WithMockUser(roles = "SYSTEM_VIEWER")
+    void get_dashboard_overview_system_viewer_ok() throws Exception {
+        mockMvc.perform(get("/dashboard/overview"))
+                .andExpect(status().is(not(403)));
+    }
+
+    @Test
     @WithMockUser(roles = "FACTORY_ADMIN")
     void get_dashboard_overview_factory_admin_ok() throws Exception {
         mockMvc.perform(get("/dashboard/overview"))
@@ -486,6 +493,16 @@ public class SecurityConfigTest {
     }
 
     @Test
+    @WithMockUser(roles = "SYSTEM_VIEWER")
+    void put_channel_system_viewer_forbidden() throws Exception {
+        mockMvc.perform(put("/channels/1")
+                .contentType(MediaType.APPLICATION_JSON)
+                .content("{}"))
+                .andExpect(status().isForbidden());
+        verifyNoInteractions(channelService);
+    }
+
+    @Test
     @WithMockUser(roles = "MEMBER")
     void post_device_channel_member_ok() throws Exception {
         mockMvc.perform(post("/devices/1/channels")
@@ -497,6 +514,13 @@ public class SecurityConfigTest {
     @Test
     @WithMockUser(roles = "VIEWER")
     void get_sensor_data_with_viewer() throws Exception {
+        mockMvc.perform(get("/sensor-data"))
+                .andExpect(status().is(not(403)));
+    }
+
+    @Test
+    @WithMockUser(roles = "SYSTEM_VIEWER")
+    void get_sensor_data_system_viewer_ok() throws Exception {
         mockMvc.perform(get("/sensor-data"))
                 .andExpect(status().is(not(403)));
     }
@@ -525,6 +549,13 @@ public class SecurityConfigTest {
     @Test
     @WithMockUser(roles = "VIEWER")
     void get_alarm_episodes_viewer_is_allowed() throws Exception {
+        mockMvc.perform(get("/alarm-episodes"))
+                .andExpect(status().isOk());
+    }
+
+    @Test
+    @WithMockUser(roles = "SYSTEM_VIEWER")
+    void get_alarm_episodes_system_viewer_is_allowed() throws Exception {
         mockMvc.perform(get("/alarm-episodes"))
                 .andExpect(status().isOk());
     }
@@ -586,6 +617,14 @@ public class SecurityConfigTest {
     }
 
     @Test
+    @WithMockUser(roles = "SYSTEM_VIEWER")
+    void ack_alarm_episode_system_viewer_is_forbidden() throws Exception {
+        mockMvc.perform(post("/alarm-episodes/1/ack"))
+                .andExpect(status().isForbidden());
+        verifyNoInteractions(alarmEpisodeService);
+    }
+
+    @Test
     void get_zones_no_auth() throws Exception {
         mockMvc.perform(get("/zones"))
                 .andExpect(status().isUnauthorized());
@@ -631,6 +670,14 @@ public class SecurityConfigTest {
     void get_admin_zones_viewer_forbidden() throws Exception {
         mockMvc.perform(get("/admin/zones"))
                 .andExpect(status().isForbidden());
+    }
+
+    @Test
+    @WithMockUser(roles = "SYSTEM_VIEWER")
+    void get_admin_users_system_viewer_forbidden() throws Exception {
+        mockMvc.perform(get("/admin/users"))
+                .andExpect(status().isForbidden());
+        verifyNoInteractions(adminService);
     }
 
     private BatchIngestResult result(BatchIngestResult.Outcome outcome) {

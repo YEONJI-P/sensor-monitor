@@ -195,6 +195,18 @@ class DashboardOverviewServiceTest {
     }
 
     @Test
+    void overview는_SYSTEM_VIEWER를_허용한다() {
+        User user = mock(User.class);
+        when(accessControlService.getUser("DEMO")).thenReturn(user);
+        when(user.getRole()).thenReturn(Role.SYSTEM_VIEWER);
+        when(accessControlService.getAccessibleDeviceIds(user)).thenReturn(List.of());
+
+        DashboardOverviewResponse result = service.getOverview("DEMO");
+
+        assertThat(result.factories()).isEmpty();
+    }
+
+    @Test
     void freshness는_감시여부와_수신이력과_기대주기_경계를_구분한다() {
         assertThat(DashboardOverviewService.freshness(null, null, NOW, ACTIVE)).isEqualTo(Freshness.NOT_MONITORED);
         assertThat(DashboardOverviewService.freshness(0, null, NOW, ACTIVE)).isEqualTo(Freshness.NOT_MONITORED);
